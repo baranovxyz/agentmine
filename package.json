@@ -1,0 +1,75 @@
+{
+  "devDependencies": {
+    "@biomejs/biome": "2.5.2",
+    "@types/node": "^22.20.1",
+    "agent-canonical": "0.1.5",
+    "ci-info": "^4.1.0",
+    "execa": "^9.5.2",
+    "tsup": "^8.0.0",
+    "tsx": "^4.23.0",
+    "typescript": "^5.7.3",
+    "vitest": "^3.2.7"
+  },
+  "name": "agentmine",
+  "version": "0.3.0",
+  "description": "Queryable work corpus of coding-agent sessions",
+  "keywords": [
+    "coding-agent",
+    "agent-sessions",
+    "session-transcripts",
+    "agent-workflows",
+    "sqlite",
+    "corpus",
+    "claude-code",
+    "codex",
+    "opencode",
+    "kilo-code",
+    "goose",
+    "cursor",
+    "gemini",
+    "qwen",
+    "cline",
+    "cli"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/baranovxyz/agentmine.git"
+  },
+  "homepage": "https://agentmine.io",
+  "bugs": {
+    "url": "https://github.com/baranovxyz/agentmine/issues"
+  },
+  "packageManager": "pnpm@10.22.0",
+  "type": "module",
+  "bin": {
+    "agentmine": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "CHANGELOG.md",
+    "guide"
+  ],
+  "scripts": {
+    "build": "rm -rf dist && tsup && node scripts/strip-bundle-provenance.js && chmod +x dist/cli.js",
+    "prepublishOnly": "npm run test:artifact",
+    "verify:dist-manifest": "node scripts/verify-dist-manifest.mjs",
+    "dev": "tsx src/cli.ts",
+    "eval:retrieval": "node scripts/evaluate-retrieval-quality.mjs",
+    "test": "vitest run",
+    "test:artifact": "vitest run tests/distSmoke.test.ts",
+    "test:ollama": "AGENTMINE_RUN_OLLAMA_E2E=1 vitest run tests/ollamaE2e.test.ts",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "lint": "tsc --noEmit && biome check .",
+    "lint:fix": "biome check --write ."
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "dependencies": {
+    "citty": "^0.2.2",
+    "uuid": "^11.0.5",
+    "zod": "^4.4.3"
+  }
+}

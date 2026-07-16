@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "agent": "team-agent-placeholder",
+  "sessionId": "fixture-001__teamtask__team-agent-placeholder__task-placeholder",
+  "messages": [
+    {
+      "id": "team-task-message-1",
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "<user_input mode=\"act\">Verify the synthetic task.</user_input>"
+        }
+      ],
+      "ts": 1700000004000
+    },
+    {
+      "id": "team-task-message-2",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "The synthetic task is verified."
+        }
+      ],
+      "ts": 1700000005000,
+      "modelInfo": {
+        "id": "team-model-placeholder",
+        "provider": "provider-placeholder"
+      },
+      "metrics": {
+        "inputTokens": 9,
+        "outputTokens": 6,
+        "cacheReadTokens": 0,
+        "cacheWriteTokens": 0
+      }
+    }
+  ]
+}

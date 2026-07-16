@@ -1,0 +1,7 @@
+{"role":"user","message":{"content":[{"type":"text","text":"<user_query>\nplease list the top-level files\n</user_query>"}]}}
+{"role":"assistant","message":{"content":[{"type":"text","text":"Reading the repo root."},{"type":"tool_use","name":"Shell","input":{"command":"ls -1"}}]}}
+{"role":"assistant","message":{"content":[{"type":"text","text":"Three entries at root."}]}}
+{"role":"user","message":{"content":[{"type":"text","text":"<attached_files>\n--- /Users/u/repo/README.md\n@@ -1 +1,2 @@\n# repo\n+more\n</attached_files>"}]}}
+{"role":"user","message":{"content":[{"type":"text","text":"<user_query>\nactually show with sizes\n</user_query>\n<external_links>\nhttps://example.com\n</external_links>"}]}}
+{"role":"assistant","message":{"content":[{"type":"tool_use","name":"Shell","input":{"command":"ls -lah"}},{"type":"tool_use","name":"TodoWrite","input":{"todos":[{"id":"a","content":"done","status":"completed"}]}}]}}
+{"role":"assistant","message":{"content":[{"type":"text","text":""},{"type":"image","source":"redacted"}]}}

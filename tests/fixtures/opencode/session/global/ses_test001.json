@@ -1,0 +1,11 @@
+{
+  "id": "ses_test001",
+  "version": "1.0.55",
+  "projectID": "global",
+  "directory": "/Users/u/repo",
+  "title": "test session for opencode adapter",
+  "time": {
+    "created": 1700000000000,
+    "updated": 1700000010000
+  }
+}

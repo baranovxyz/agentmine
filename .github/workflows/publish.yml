@@ -1,0 +1,427 @@
+name: Publish to npm
+
+# Manual release. The unprivileged prepare job builds, tests, and packs the exact
+# candidate. Only the minimal publish job receives an npm-environment OIDC token;
+# it downloads and hashes the prepared tarball and never checks out or executes
+# repository code. Registry/provenance verification runs afterward without OIDC.
+# Configure the trusted publisher on npmjs.org first: package agentmine -> GitHub ->
+# baranovxyz/agentmine -> .github/workflows/publish.yml (+ environment "npm").
+on:
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: "Dry run (skip the actual publish)"
+        required: false
+        type: boolean
+        default: false
+      finalize-only:
+        description: "Repair tag/release metadata after npm accepted this exact commit"
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  prepare:
+    if: ${{ github.repository == 'baranovxyz/agentmine' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      integrity: ${{ steps.pack.outputs.integrity }}
+      already_published: ${{ steps.availability.outputs.already_published }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: 10.22.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - run: npm install -g npm@11.17.0 --ignore-scripts
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+
+      - name: Verify packed artifact contract
+        run: pnpm test:artifact
+
+      - name: Resolve version + dist-tag
+        id: version
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          if [[ "$VERSION" == *-* ]]; then
+            echo "tag=next" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=latest" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Tag preflight
+        run: |
+          TAG="v${{ steps.version.outputs.version }}"
+          REMOTE_SHA=$(git ls-remote origin "refs/tags/$TAG^{}" | cut -f1)
+          if [[ -z "$REMOTE_SHA" ]]; then
+            REMOTE_SHA=$(git ls-remote origin "refs/tags/$TAG" | cut -f1)
+          fi
+          if [[ -n "$REMOTE_SHA" && "$REMOTE_SHA" != "$GITHUB_SHA" ]]; then
+            echo "::error::Tag $TAG already points at $REMOTE_SHA, expected $GITHUB_SHA"
+            exit 1
+          fi
+
+      - name: Pack release candidate
+        id: pack
+        run: |
+          npm pack --ignore-scripts --json > "$RUNNER_TEMP/pack.json"
+          node -e '
+            const fs = require("node:fs");
+            const entries = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+            const entry = entries[0];
+            if (!entry?.integrity || !entry?.filename) throw new Error("npm pack returned no artifact");
+            fs.renameSync(entry.filename, "agentmine-release.tgz");
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, "integrity=" + entry.integrity + "\n");
+          ' "$RUNNER_TEMP/pack.json"
+
+      - name: Verify packed dist against reviewed manifest
+        run: |
+          EXTRACT_DIR="$RUNNER_TEMP/agentmine-release-extract"
+          rm -rf "$EXTRACT_DIR"
+          mkdir -p "$EXTRACT_DIR"
+          tar -xzf agentmine-release.tgz -C "$EXTRACT_DIR"
+          node scripts/verify-dist-manifest.mjs \
+            --package-root "$EXTRACT_DIR/package" \
+            --manifest "$GITHUB_WORKSPACE/dist-manifest.json"
+
+      - name: Scan packed dist for secret-like values
+        env:
+          TRUFFLEHOG_INSTALLER_SHA256: c394defeaea8a7c48f828a2051b608a9b19f43f34b891407b66a386c3e2591e2
+        run: |
+          INSTALLER="$RUNNER_TEMP/trufflehog-install.sh"
+          curl -fsSL \
+            https://raw.githubusercontent.com/trufflesecurity/trufflehog/a7bdcf95222c4369422764e168fad84fc912f0dc/scripts/install.sh \
+            -o "$INSTALLER"
+          echo "$TRUFFLEHOG_INSTALLER_SHA256  $INSTALLER" | sha256sum --check --strict
+          sh "$INSTALLER" -b "$RUNNER_TEMP/bin" v3.95.9
+          set +e
+          "$RUNNER_TEMP/bin/trufflehog" filesystem \
+            "$RUNNER_TEMP/agentmine-release-extract/package/dist" \
+            --no-verification --no-update --fail --json --log-level=-1 \
+            >"$RUNNER_TEMP/trufflehog-packed-dist.jsonl" \
+            2>"$RUNNER_TEMP/trufflehog-packed-dist.stderr"
+          SCAN_STATUS=$?
+          set -e
+          if [[ "$SCAN_STATUS" -ne 0 ]]; then
+            echo "::error::Packed dist contains a secret-like value or the scanner failed"
+            exit 1
+          fi
+
+      - name: Version + recovery guard
+        id: availability
+        run: |
+          PACKAGE="agentmine@${{ steps.version.outputs.version }}"
+          FINALIZE_ONLY="${{ inputs['finalize-only'] }}"
+          if [[ "$FINALIZE_ONLY" == "true" && "${{ inputs['dry-run'] }}" == "true" ]]; then
+            echo "::error::finalize-only and dry-run cannot be combined"
+            exit 1
+          fi
+          set +e
+          npm view "$PACKAGE" version >"$RUNNER_TEMP/npm-view.out" 2>"$RUNNER_TEMP/npm-view.err"
+          VIEW_STATUS=$?
+          set -e
+          if [[ "$VIEW_STATUS" -eq 0 ]]; then
+            if [[ "${{ inputs['dry-run'] }}" == "true" ]]; then
+              echo "::error::$PACKAGE is already published; dry-run requires an unpublished version"
+              exit 1
+            fi
+            echo "already_published=true" >> "$GITHUB_OUTPUT"
+            echo "$PACKAGE exists; skipping publish and requiring exact integrity + provenance verification"
+          elif grep -q 'E404' "$RUNNER_TEMP/npm-view.err"; then
+            if [[ "$FINALIZE_ONLY" == "true" ]]; then
+              echo "::error::$PACKAGE is not published; finalize-only cannot continue"
+              exit 1
+            fi
+            echo "already_published=false" >> "$GITHUB_OUTPUT"
+            echo "$PACKAGE is available for publication"
+          else
+            cat "$RUNNER_TEMP/npm-view.err" >&2
+            echo "::error::Could not determine whether $PACKAGE already exists"
+            exit 1
+          fi
+
+      - name: Preview tarball contents
+        run: tar -tf agentmine-release.tgz
+
+      - name: Upload tested release candidate
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: agentmine-release-candidate
+          path: agentmine-release.tgz
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  publish:
+    needs: prepare
+    if: >-
+      ${{
+        github.repository == 'baranovxyz/agentmine' &&
+        github.ref == 'refs/heads/main' &&
+        (
+          inputs['dry-run'] ||
+          (
+            !inputs['finalize-only'] &&
+            needs.prepare.outputs.already_published != 'true'
+          )
+        )
+      }}
+    runs-on: ubuntu-latest
+    environment: npm
+    permissions:
+      actions: read
+      id-token: write
+    env:
+      ARTIFACT: ${{ github.workspace }}/release-artifact/agentmine-release.tgz
+      EXPECTED_INTEGRITY: ${{ needs.prepare.outputs.integrity }}
+    steps:
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      # Trusted publishing needs npm >= 11.5.1. Install the exact CLI with
+      # lifecycle scripts disabled; never set NODE_AUTH_TOKEN.
+      - run: npm install -g npm@11.17.0 --ignore-scripts
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: agentmine-release-candidate
+          path: release-artifact
+      - name: Verify downloaded tarball integrity
+        run: |
+          node -e '
+            const fs = require("node:fs");
+            const { createHash } = require("node:crypto");
+            const actual = "sha512-" + createHash("sha512")
+              .update(fs.readFileSync(process.env.ARTIFACT))
+              .digest("base64");
+            if (actual !== process.env.EXPECTED_INTEGRITY) {
+              throw new Error("downloaded release candidate integrity mismatch");
+            }
+          '
+      - name: Publish (dry run)
+        if: ${{ inputs['dry-run'] }}
+        run: npm publish "$ARTIFACT" --provenance --access public --ignore-scripts --tag ${{ needs.prepare.outputs.tag }} --dry-run
+      - name: Publish
+        if: ${{ !inputs['dry-run'] }}
+        run: npm publish "$ARTIFACT" --provenance --access public --ignore-scripts --tag ${{ needs.prepare.outputs.tag }}
+
+  verify:
+    needs: [prepare, publish]
+    if: >-
+      ${{
+        always() &&
+        !inputs['dry-run'] &&
+        github.repository == 'baranovxyz/agentmine' &&
+        github.ref == 'refs/heads/main' &&
+        needs.prepare.result == 'success' &&
+        (
+          (
+            needs.prepare.outputs.already_published == 'true' &&
+            needs.publish.result == 'skipped'
+          ) ||
+          (
+            needs.prepare.outputs.already_published != 'true' &&
+            needs.publish.result == 'success'
+          )
+        )
+      }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    env:
+      ARTIFACT: ${{ github.workspace }}/release-artifact/agentmine-release.tgz
+      PACKAGE: agentmine@${{ needs.prepare.outputs.version }}
+      EXPECTED_INTEGRITY: ${{ needs.prepare.outputs.integrity }}
+      EXPECTED_SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: agentmine-release-candidate
+          path: release-artifact
+      - name: Install verifier dependency without lifecycle scripts
+        run: |
+          mkdir -p "$RUNNER_TEMP/verifier"
+          npm install --prefix "$RUNNER_TEMP/verifier" --ignore-scripts --no-save --no-package-lock zod@4.4.3
+      - name: Verify local candidate, registry integrity, and GitHub provenance
+        working-directory: ${{ runner.temp }}/verifier
+        run: |
+          LOCAL_INTEGRITY=$(node -e '
+            const fs = require("node:fs");
+            const { createHash } = require("node:crypto");
+            process.stdout.write("sha512-" + createHash("sha512")
+              .update(fs.readFileSync(process.env.ARTIFACT))
+              .digest("base64"));
+          ')
+          if [[ "$LOCAL_INTEGRITY" != "$EXPECTED_INTEGRITY" ]]; then
+            echo "::error::downloaded release candidate integrity mismatch"
+            exit 1
+          fi
+
+          PUBLISHED_INTEGRITY=""
+          ATTESTATION_URL=""
+          for ATTEMPT in 1 2 3 4 5 6; do
+            set +e
+            PUBLISHED_INTEGRITY=$(npm view "$PACKAGE" dist.integrity 2>"$RUNNER_TEMP/integrity.err")
+            INTEGRITY_STATUS=$?
+            ATTESTATION_URL=$(npm view "$PACKAGE" dist.attestations.url 2>"$RUNNER_TEMP/attestation.err")
+            ATTESTATION_STATUS=$?
+            set -e
+            if [[ "$INTEGRITY_STATUS" -eq 0 && "$ATTESTATION_STATUS" -eq 0 && \
+                  -n "$PUBLISHED_INTEGRITY" && -n "$ATTESTATION_URL" ]]; then
+              break
+            fi
+            if [[ "$ATTEMPT" -eq 6 ]]; then
+              cat "$RUNNER_TEMP/integrity.err" "$RUNNER_TEMP/attestation.err" >&2
+              echo "::error::$PACKAGE registry metadata did not become available after 6 attempts"
+              exit 1
+            fi
+            sleep 5
+          done
+          if [[ "$PUBLISHED_INTEGRITY" != "$EXPECTED_INTEGRITY" ]]; then
+            echo "::error::$PACKAGE integrity does not match the tested release candidate"
+            exit 1
+          fi
+          export ATTESTATION_URL
+          node --input-type=module -e '
+            import { z } from "zod";
+            const documentSchema = z.object({
+              attestations: z.array(z.object({
+                predicateType: z.string(),
+                bundle: z.object({
+                  dsseEnvelope: z.object({ payload: z.string() }).passthrough(),
+                }).passthrough(),
+              }).passthrough()),
+            }).passthrough();
+            const statementSchema = z.object({
+              subject: z.array(z.object({
+                name: z.string(),
+                digest: z.object({ sha512: z.string() }).passthrough(),
+              }).passthrough()),
+              predicate: z.object({
+                buildDefinition: z.object({
+                  externalParameters: z.object({
+                    workflow: z.object({
+                      ref: z.string(),
+                      repository: z.string(),
+                      path: z.string(),
+                    }).passthrough(),
+                  }).passthrough(),
+                  resolvedDependencies: z.array(z.object({
+                    digest: z.object({ gitCommit: z.string() }).passthrough(),
+                  }).passthrough()),
+                }).passthrough(),
+              }).passthrough(),
+            }).passthrough();
+            let document;
+            for (let attempt = 1; attempt <= 6; attempt++) {
+              try {
+                const response = await fetch(process.env.ATTESTATION_URL);
+                if (response.ok) {
+                  const parsed = documentSchema.safeParse(await response.json());
+                  if (parsed.success && parsed.data.attestations.some(
+                    (entry) => entry.predicateType === "https://slsa.dev/provenance/v1",
+                  )) {
+                    document = parsed.data;
+                    break;
+                  }
+                }
+              } catch {
+                // Bounded retry below; the final attempt remains fail closed.
+              }
+              if (attempt < 6) {
+                await new Promise((resolve) => setTimeout(resolve, 5000));
+              }
+            }
+            if (!document) throw new Error("SLSA provenance attestation was unavailable after 6 attempts");
+            const attestation = document.attestations.find(
+              (entry) => entry.predicateType === "https://slsa.dev/provenance/v1",
+            );
+            if (!attestation) throw new Error("SLSA provenance attestation is missing");
+            const statement = statementSchema.parse(JSON.parse(
+              Buffer.from(attestation.bundle.dsseEnvelope.payload, "base64").toString("utf8"),
+            ));
+            const expectedIntegrity = process.env.EXPECTED_INTEGRITY;
+            if (!expectedIntegrity?.startsWith("sha512-")) {
+              throw new Error("tested tarball has no sha512 integrity");
+            }
+            const expectedDigest = Buffer.from(
+              expectedIntegrity.slice("sha512-".length),
+              "base64",
+            ).toString("hex");
+            const subject = statement.subject.find(
+              (entry) => entry.name === "pkg:npm/" + process.env.PACKAGE,
+            );
+            if (subject?.digest.sha512 !== expectedDigest) {
+              throw new Error("provenance subject does not match the tested tarball");
+            }
+            const workflow = statement.predicate.buildDefinition.externalParameters.workflow;
+            if (workflow.repository !== "https://github.com/baranovxyz/agentmine" ||
+                workflow.ref !== "refs/heads/main" ||
+                workflow.path !== ".github/workflows/publish.yml") {
+              throw new Error("provenance was produced by an unexpected workflow");
+            }
+            const commits = statement.predicate.buildDefinition.resolvedDependencies
+              .map((entry) => entry.digest.gitCommit);
+            if (!commits.includes(process.env.EXPECTED_SHA)) {
+              throw new Error("provenance does not resolve to the release commit");
+            }
+          '
+
+  tag-and-release:
+    needs: [prepare, verify]
+    if: >-
+      ${{
+        always() &&
+        !inputs['dry-run'] &&
+        github.repository == 'baranovxyz/agentmine' &&
+        github.ref == 'refs/heads/main' &&
+        needs.prepare.result == 'success' &&
+        needs.verify.result == 'success'
+      }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Create + push tag
+        run: |
+          TAG="v${{ needs.prepare.outputs.version }}"
+          REMOTE_SHA=$(git ls-remote origin "refs/tags/$TAG^{}" | cut -f1)
+          if [[ -z "$REMOTE_SHA" ]]; then
+            REMOTE_SHA=$(git ls-remote origin "refs/tags/$TAG" | cut -f1)
+          fi
+          if [[ -n "$REMOTE_SHA" && "$REMOTE_SHA" != "$GITHUB_SHA" ]]; then
+            echo "::error::Tag $TAG already points at $REMOTE_SHA, expected $GITHUB_SHA"
+            exit 1
+          elif [[ -n "$REMOTE_SHA" ]]; then
+            echo "Tag $TAG already points at the published commit"
+          else
+            git tag "$TAG" "$GITHUB_SHA"
+            git push origin "refs/tags/$TAG"
+          fi
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="v${{ needs.prepare.outputs.version }}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release already exists for $TAG"
+          else
+            PRERELEASE=""
+            if [[ "$TAG" == *-* ]]; then PRERELEASE="--prerelease"; fi
+            gh release create "$TAG" --generate-notes --title "$TAG" $PRERELEASE
+          fi

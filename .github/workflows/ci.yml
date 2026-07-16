@@ -1,0 +1,109 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # agentmine requires Node >= 24 for the built-in node:sqlite module.
+        include:
+          - node-version: 24
+            pnpm-version: 9
+            pnpm_args: --config.manage-package-manager-versions=false
+          - node-version: 24
+            pnpm-version: 10
+            pnpm_args: --config.manage-package-manager-versions=false
+          - node-version: 24
+            pnpm-version: 11
+            pnpm_args: --pm-on-fail=ignore --config.manage-package-manager-versions=false
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: ${{ matrix.pnpm-version }}
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ matrix.node-version }}
+      - name: Verify selected pnpm major
+        env:
+          EXPECTED_PNPM_MAJOR: ${{ matrix.pnpm-version }}
+        run: |
+          ACTUAL_PNPM="$(pnpm ${{ matrix.pnpm_args }} --version)"
+          test "${ACTUAL_PNPM%%.*}" = "$EXPECTED_PNPM_MAJOR"
+      - run: pnpm ${{ matrix.pnpm_args }} install --frozen-lockfile
+      - run: pnpm ${{ matrix.pnpm_args }} run build
+      - run: pnpm ${{ matrix.pnpm_args }} run test
+      - run: pnpm ${{ matrix.pnpm_args }} run verify:dist-manifest
+      - name: Preview npm tarball contents
+        run: npm pack --dry-run
+      - name: Scan built dist for live secrets
+        env:
+          TRUFFLEHOG_INSTALLER_SHA256: c394defeaea8a7c48f828a2051b608a9b19f43f34b891407b66a386c3e2591e2
+        run: |
+          INSTALLER="$RUNNER_TEMP/trufflehog-install.sh"
+          curl -fsSL \
+            https://raw.githubusercontent.com/trufflesecurity/trufflehog/a7bdcf95222c4369422764e168fad84fc912f0dc/scripts/install.sh \
+            -o "$INSTALLER"
+          echo "$TRUFFLEHOG_INSTALLER_SHA256  $INSTALLER" | sha256sum --check --strict
+          sh "$INSTALLER" -b "$RUNNER_TEMP/bin" v3.95.9
+          set +e
+          "$RUNNER_TEMP/bin/trufflehog" filesystem ./dist \
+            --no-verification --no-update --fail --json --log-level=-1 \
+            >"$RUNNER_TEMP/trufflehog-dist.jsonl" \
+            2>"$RUNNER_TEMP/trufflehog-dist.stderr"
+          SCAN_STATUS=$?
+          set -e
+          if [[ "$SCAN_STATUS" -ne 0 ]]; then
+            echo "::error::Built dist contains a secret-like value or the scanner failed"
+            exit 1
+          fi
+
+  artifact-node-floor:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: 9
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          # Keep the exact declared floor covered: early Node 24 emits a
+          # node:sqlite ExperimentalWarning that must not pollute stderr.
+          node-version: 24.0.0
+      - name: Verify selected pnpm major
+        env:
+          EXPECTED_PNPM_MAJOR: "9"
+        run: |
+          ACTUAL_PNPM="$(pnpm --config.manage-package-manager-versions=false --version)"
+          test "${ACTUAL_PNPM%%.*}" = "$EXPECTED_PNPM_MAJOR"
+      - run: pnpm --config.manage-package-manager-versions=false install --frozen-lockfile
+      - run: pnpm --config.manage-package-manager-versions=false run build
+      - run: pnpm --config.manage-package-manager-versions=false run test:artifact
+      - run: pnpm --config.manage-package-manager-versions=false run verify:dist-manifest
+
+  secret-scan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # gitleaks-action lists PR commits via the API on pull_request events
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+      - name: Gitleaks (regex secret scan over full history)
+        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # contents:read only — commenting on PRs would 403 (Resource not accessible)
+          GITLEAKS_ENABLE_COMMENTS: false

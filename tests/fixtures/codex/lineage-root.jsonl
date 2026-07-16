@@ -1,0 +1,2 @@
+{"timestamp":"2026-07-01T10:00:00.000Z","type":"session_meta","payload":{"id":"lineage-root-001","timestamp":"2026-07-01T10:00:00.000Z","cwd":"/workspace/example","originator":"codex-tui","cli_version":"0.144.0","thread_source":"cli","agent_nickname":"Turing"}}
+{"timestamp":"2026-07-01T10:00:01.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Coordinate the synthetic investigation."}]}}

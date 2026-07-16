@@ -1,0 +1,2 @@
+{"role":"user","message":{"content":[{"type":"text","text":"<user_query>\nfetch the wiki page idx 12345\n</user_query>"}]}}
+{"role":"assistant","message":{"content":[{"type":"text","text":"Calling the MCP tool."},{"type":"tool_use","name":"CallMcpTool","input":{"server":"example-wiki","toolName":"get_page_details","arguments":{"idx":12345}}}]}}

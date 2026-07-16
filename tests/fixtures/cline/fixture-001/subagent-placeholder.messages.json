@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "agent": "subagent-placeholder",
+  "sessionId": "fixture-001__subagent-placeholder",
+  "messages": [
+    {
+      "id": "subagent-message-1",
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "<user_input mode=\"act\">Inspect the synthetic module.</user_input>"
+        }
+      ],
+      "ts": 1700000002000
+    },
+    {
+      "id": "subagent-message-2",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "The synthetic module is consistent."
+        }
+      ],
+      "ts": 1700000003000,
+      "modelInfo": {
+        "id": "subagent-model-placeholder",
+        "provider": "provider-placeholder"
+      },
+      "metrics": {
+        "inputTokens": 8,
+        "outputTokens": 5,
+        "cacheReadTokens": 0,
+        "cacheWriteTokens": 0
+      }
+    }
+  ]
+}

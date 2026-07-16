@@ -1,0 +1,16 @@
+{
+  "id": "prt_a03_tool_ok",
+  "sessionID": "ses_test001",
+  "messageID": "msg_asst001",
+  "type": "tool",
+  "callID": "call_aaa",
+  "tool": "list",
+  "state": {
+    "status": "completed",
+    "input": { "path": "/Users/u/repo" },
+    "output": "README.md\npackage.json\nsrc/\n",
+    "title": "list",
+    "metadata": { "count": 3, "truncated": false },
+    "time": { "start": 1700000005100, "end": 1700000005250 }
+  }
+}

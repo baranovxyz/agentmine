@@ -1,0 +1,14 @@
+{
+  "id": "prt_a04_tool_err",
+  "sessionID": "ses_test001",
+  "messageID": "msg_asst001",
+  "type": "tool",
+  "callID": "call_bbb",
+  "tool": "read",
+  "state": {
+    "status": "error",
+    "input": { "path": "/missing" },
+    "error": "ENOENT: no such file",
+    "time": { "start": 1700000005300, "end": 1700000005320 }
+  }
+}

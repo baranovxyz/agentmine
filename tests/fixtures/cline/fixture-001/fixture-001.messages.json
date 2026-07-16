@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "agent": "lead",
+  "sessionId": "fixture-001",
+  "messages": [
+    {
+      "id": "fixture-message-1",
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "<user_input mode=\"act\">Summarize the sample project.</user_input>"
+        }
+      ],
+      "ts": 1700000000000
+    },
+    {
+      "id": "fixture-message-2",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "The sample project is ready."
+        }
+      ],
+      "ts": 1700000001000,
+      "modelInfo": {
+        "id": "model-placeholder",
+        "provider": "provider-placeholder"
+      },
+      "metrics": {
+        "inputTokens": 12,
+        "outputTokens": 6,
+        "cacheReadTokens": 0,
+        "cacheWriteTokens": 0
+      }
+    }
+  ]
+}

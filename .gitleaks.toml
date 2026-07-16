@@ -1,0 +1,20 @@
+# Extends the default ruleset. Synthetic credentials in redaction tests use
+# line-local gitleaks:allow comments; the scoped rule below exempts one model label.
+title = "agentmine gitleaks config"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "generic-api-key"
+
+[rules.allowlist]
+description = "LiteLLM model-name example, not an API credential"
+condition = "AND"
+regexTarget = "line"
+paths = [
+  '''src/prices/litellm\.ts''',
+]
+regexes = [
+  '''^[[:space:]]*\*[[:space:]]LiteLLM key: `claude-haiku-4-5-20251001` -> `claude-haiku-4-5`,$''',
+]

@@ -1,0 +1,10 @@
+packages:
+  - .
+
+# pnpm 9/10 build-script allowlist
+onlyBuiltDependencies:
+  - "esbuild"
+
+# pnpm 11+ build-script policy
+allowBuilds:
+  "esbuild": true

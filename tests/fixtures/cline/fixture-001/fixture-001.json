@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "session_id": "fixture-001",
+  "source": "cli",
+  "status": "completed",
+  "provider": "provider-placeholder",
+  "model": "model-placeholder",
+  "cwd": "/home/example/sample-project",
+  "workspace_root": "/home/example/sample-project",
+  "started_at": "2023-11-14T22:13:20.000Z",
+  "ended_at": "2023-11-14T22:13:21.000Z",
+  "metadata": {
+    "title": "Summarize the sample project.",
+    "model": "model-placeholder"
+  }
+}

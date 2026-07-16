@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "algorithm": "sha256",
+  "root": "dist",
+  "files": [
+    {
+      "path": "chunk-KPPCQCIC.js",
+      "sha256": "533f2c30a55ca2cf1bc65b8fea5f434f4681ed5b8b25e34aff62970637014605",
+      "size": 142217,
+      "executable": false
+    },
+    {
+      "path": "cli.js",
+      "sha256": "84fd4bea026395cb2d9daa55a390eab792dfe214ceca86d62430cd0e500e42b0",
+      "size": 418,
+      "executable": true
+    },
+    {
+      "path": "lib.js",
+      "sha256": "895fc2abafa1c3ce1586f993e38bdf2ed0cde055e7b544e2ee800461a0a0f8a4",
+      "size": 805,
+      "executable": false
+    },
+    {
+      "path": "main-D2SIMLUA.js",
+      "sha256": "e383e7e6499f5cde4f1cb365cb43e0f639b9cd3e5824aa4c2e8a64e6b02565b2",
+      "size": 285957,
+      "executable": false
+    }
+  ]
+}

@@ -1,0 +1,6 @@
+{
+  "id": "prt_a05_step_finish",
+  "sessionID": "ses_test001",
+  "messageID": "msg_asst001",
+  "type": "step-finish"
+}
