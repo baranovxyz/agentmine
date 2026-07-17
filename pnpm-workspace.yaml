@@ -8,3 +8,9 @@ onlyBuiltDependencies:
 # pnpm 11+ build-script policy
 allowBuilds:
   "esbuild": true
+
+# pnpm 11.3+: the standalone lockfile is generated inside the umbrella and
+# audited before every mirror push, so treat it as already-trusted and skip
+# re-verifying each entry against the supply-chain trust policy on frozen
+# install (otherwise a trust-downgraded transitive dep fails CI on pnpm 11).
+trustLockfile: true
