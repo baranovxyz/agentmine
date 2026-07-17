@@ -17,6 +17,7 @@ import {
 } from "agent-canonical/parsers/claude-code";
 import { parseSessionFile as parseClineSessionFile } from "agent-canonical/parsers/cline";
 import { parseSessionFile as parseCodexSessionFile } from "agent-canonical/parsers/codex";
+import { parseSessionFile as parseCopilotSessionFile } from "agent-canonical/parsers/copilot";
 import {
   type CursorParseOptions,
   parseSessionFile as parseCursorSessionFile,
@@ -269,4 +270,20 @@ export async function parseClineFile(
   // parser authoritative and avoids rereading a sibling that could change
   // between parse and cache-key calculation.
   return { ...session, contentHash: hash };
+}
+
+/**
+ * GitHub Copilot CLI writes each session as a directory
+ * `~/.copilot/session-state/<uuid>/`; `filePath` is that dir's `events.jsonl`
+ * (the lossless typed event stream). It is self-sufficient — no sibling
+ * metadata file — so the flattened session needs no extra cache-key mixing. The
+ * shared parser stamps `cli:"copilot"`, so the flattened source is already
+ * "copilot" — no override needed.
+ */
+export async function parseCopilotFile(
+  filePath: string,
+): Promise<CanonicalSession | null> {
+  const result = await parseCopilotSessionFile(filePath);
+  if (!result.success) return null;
+  return flattenSession(result.data);
 }

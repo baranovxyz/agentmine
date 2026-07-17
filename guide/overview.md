@@ -7,8 +7,8 @@ description: Agentmine turns local AI coding-agent session transcript archives i
 queryable SQLite corpus.
 
 It ingests session transcripts from tools such as Claude Code, Cursor, Codex, Gemini CLI, Qwen
-Code, Cline, Kilo Code, Goose, and opencode, normalizes them into a shared schema, extracts useful
-facts, and exposes the result through an agent-friendly JSON CLI.
+Code, Cline, GitHub Copilot CLI, Kilo Code, Goose, and opencode, normalizes them into a shared
+schema, extracts useful facts, and exposes the result through an agent-friendly JSON CLI.
 
 ## Answer questions like
 

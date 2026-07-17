@@ -12,6 +12,7 @@ import {
   parseClaudeCodeFile,
   parseClineFile,
   parseCodexFile,
+  parseCopilotFile,
   parseGeminiFile,
   parseQwenFile,
 } from "../src/adapters/canonical.js";
@@ -28,6 +29,13 @@ const CLINE_FIXTURE = join(
   "cline",
   "fixture-001",
   "fixture-001.messages.json",
+);
+const COPILOT_FIXTURE = join(
+  __dirname,
+  "fixtures",
+  "copilot",
+  "fixture-001",
+  "events.jsonl",
 );
 
 describe("canonical seam — parseClaudeCodeFile (shared parser via canonical.ts)", () => {
@@ -165,6 +173,25 @@ describe("canonical seam — parseClineFile (shared parser via canonical.ts)", (
     expect(session?.projectPath).toBe("/home/example/sample-project");
     expect(session?.model).toBe("model-placeholder");
     expect(session?.messages).toHaveLength(2);
+    expect(session?.inputTokens).toBe(12);
+    expect(session?.outputTokens).toBe(6);
+    expect(session?.contentHash).toMatch(/^[0-9a-f]{64}$/u);
+  });
+});
+
+describe("canonical seam — parseCopilotFile (shared parser via canonical.ts)", () => {
+  it("flattens a Copilot events.jsonl with identity, metadata, and usage", async () => {
+    const session = await parseCopilotFile(COPILOT_FIXTURE);
+
+    expect(session).not.toBeNull();
+    expect(session?.source).toBe("copilot");
+    expect(session?.id).toBe("copilot--fixture-001");
+    expect(session?.projectPath).toBe("/home/example/sample-project");
+    expect(session?.gitBranch).toBe("main");
+    expect(session?.model).toBe("model-placeholder");
+    // user, tool-issuing assistant, final assistant.
+    expect(session?.messages).toHaveLength(3);
+    // Totals come from the session.shutdown modelMetrics aggregate.
     expect(session?.inputTokens).toBe(12);
     expect(session?.outputTokens).toBe(6);
     expect(session?.contentHash).toMatch(/^[0-9a-f]{64}$/u);

@@ -3,6 +3,13 @@
 Notable Agentmine changes only. Keep this file short; detailed implementation notes belong in
 commit history and release notes.
 
+## 0.4.0 - 2026-07-17
+
+- Ingest GitHub Copilot CLI sessions from the per-session `events.jsonl` event stream
+  (`~/.copilot/session-state/<uuid>/`), including model, per-message output tokens, session-total
+  usage, thinking (`reasoningText`), and tool calls correlated across events by `toolCallId`.
+- Source per-CLI transcript parsing from `agent-canonical` 0.1.6 (adds the Copilot parser).
+
 ## 0.3.0 - 2026-07-16
 
 - Verify packed CLI and library entrypoints before release.

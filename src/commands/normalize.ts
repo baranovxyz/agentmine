@@ -9,6 +9,7 @@ import {
   parseClaudeCodeFile,
   parseClineFile,
   parseCodexFile,
+  parseCopilotFile,
   parseCursorFile,
   parseGeminiFile,
   parseGooseSessionFromDb,
@@ -154,13 +155,23 @@ const BUILT_IN_SOURCES: SourceConfig[] = [
     freshnessSiblings: listClineMetadataSibling,
     parse: parseClineFile,
   },
+  // File-based GitHub Copilot CLI. `sync` mirrors Copilot's `session-state`
+  // directory into rawCopilot. The parser reads every mirrored session dir's
+  // `events.jsonl` typed event stream (the lossless source of truth).
+  {
+    name: "copilot",
+    rootPath: paths.rawCopilot,
+    inputMode: "synced-files",
+    listFiles: listCopilotSessions,
+    parse: parseCopilotFile,
+  },
 ];
 
 export const normalizeCommand = defineCommand({
   meta: {
     name: "normalize",
     description:
-      "Parse raw session archives (claude-code + cursor + opencode + codex + gemini + qwen + kilo + goose + cline) into the agentmine SQLite corpus",
+      "Parse raw session archives (claude-code + cursor + opencode + codex + gemini + qwen + kilo + goose + cline + copilot) into the agentmine SQLite corpus",
   },
   args: {
     force: {
@@ -181,7 +192,7 @@ export const normalizeCommand = defineCommand({
     source: {
       type: "string",
       description:
-        "Filter to one source: claude-code | cursor | opencode | opencode-db | codex | gemini | qwen | kilo | goose | cline",
+        "Filter to one source: claude-code | cursor | opencode | opencode-db | codex | gemini | qwen | kilo | goose | cline | copilot",
     },
     since: {
       type: "string",
@@ -765,6 +776,29 @@ async function listClineSessions(root: string): Promise<string[]> {
       } catch {
         /* artifact disappeared during enumeration — skip */
       }
+    }
+  }
+  return out.sort();
+}
+
+// ---------- Copilot walker ----------
+async function listCopilotSessions(root: string): Promise<string[]> {
+  // Copilot stores each session as <root>/<uuid>/events.jsonl (the typed event
+  // stream). Enumerate every nonempty events.jsonl one level down; real paths
+  // keep the --since mtime filter working.
+  const out: string[] = [];
+  const entries = await readdir(root, { withFileTypes: true }).catch(
+    () => null,
+  );
+  if (entries === null) return out;
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const eventsPath = join(root, entry.name, "events.jsonl");
+    try {
+      const st = await stat(eventsPath);
+      if (st.isFile() && st.size > 0) out.push(eventsPath);
+    } catch {
+      /* no events.jsonl in this dir — skip */
     }
   }
   return out.sort();

@@ -26,6 +26,7 @@ Default paths live under Agentmine's user data directory:
 | `<sessions>/gemini/` | mirrored Gemini CLI transcripts from `~/.gemini/tmp/` |
 | `<sessions>/qwen/` | mirrored Qwen Code transcripts from `~/.qwen/projects/` |
 | `<sessions>/cline/` | mirrored Cline session JSON from Cline's resolved sessions directory |
+| `<sessions>/copilot/` | mirrored GitHub Copilot CLI event streams from `~/.copilot/session-state/` |
 | `<sessions>/opencode/` | legacy file-based opencode archives, when present |
 | `<sessions>/sessions.db` | SQLite corpus |
 | `<sessions>/backups/` | backup archives |

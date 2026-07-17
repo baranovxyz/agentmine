@@ -2,7 +2,7 @@
   "devDependencies": {
     "@biomejs/biome": "2.5.2",
     "@types/node": "^22.20.1",
-    "agent-canonical": "0.1.5",
+    "agent-canonical": "0.1.6",
     "ci-info": "^4.1.0",
     "execa": "^9.5.2",
     "tsup": "^8.0.0",
@@ -11,7 +11,7 @@
     "vitest": "^3.2.7"
   },
   "name": "agentmine",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Queryable work corpus of coding-agent sessions",
   "keywords": [
     "coding-agent",
@@ -29,6 +29,7 @@
     "gemini",
     "qwen",
     "cline",
+    "copilot",
     "cli"
   ],
   "license": "MIT",

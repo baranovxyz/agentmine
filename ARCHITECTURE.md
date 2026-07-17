@@ -18,6 +18,7 @@ folder "Source directories" {
   [~/.gemini/tmp/] as gemini
   [~/.qwen/projects/] as qwen
   [~/.cline/data/sessions/] as cline
+  [~/.copilot/session-state/] as copilot
   [<sessions>/opencode/\nlegacy session archive] as opencodeFiles
   [~/.local/share/opencode/opencode.db] as opencodeDb
   [~/.local/share/kilo/kilo.db] as kiloDb
@@ -45,6 +46,7 @@ codex --> sharedParsers : sync + parse
 gemini --> sharedParsers : sync + parse
 qwen --> sharedParsers : sync + parse
 cline --> sharedParsers : sync + parse
+copilot --> sharedParsers : sync + parse
 opencodeFiles --> sharedParsers : parse
 opencodeDb --> sharedParsers : direct read
 kiloDb --> sharedParsers : direct read
@@ -243,6 +245,18 @@ Cline specific:
 - The shared parser preserves thinking, per-message token usage, and tool results correlated across
   later messages by tool-use ID. `normalize --source cline` reads the mirrored file pairs.
 
+GitHub Copilot CLI specific:
+
+- `sync` mirrors `~/.copilot/session-state/` into `<sessions>/copilot/`. Each session is a directory
+  whose `events.jsonl` (a typed event stream, one `{type, data, id, timestamp, parentId}` per line)
+  is the lossless source of truth; the sibling per-session `session.db` and the top-level
+  `session-store.db` FTS index are not read.
+- The shared parser folds the event stream into canonical messages, correlating each tool call
+  (issued in an `assistant.message`) with its later `tool.execution_complete` by `toolCallId`, and
+  splits `reasoningText` into thinking. Per-message usage is output-only, so transcript totals come
+  from the `session.shutdown` aggregate. `normalize --source copilot` reads the mirrored
+  `events.jsonl` files.
+
 Kilo Code specific:
 
 - Kilo Code uses an opencode-lineage SQLite schema in `~/.local/share/kilo/kilo.db`.
@@ -269,9 +283,9 @@ adapters by source.
 
 ### SQLite-backed stores are read live, not snapshotted
 
-`agentmine sync` rsyncs Claude Code, Cursor, Codex, Gemini CLI, Qwen Code, and Cline
-(file-per-session), but **deliberately does not snapshot the opencode, Kilo Code, or Goose SQLite
-stores**. The `opencode-db`, `kilo`, and `goose` sources open their default databases directly in
+`agentmine sync` rsyncs Claude Code, Cursor, Codex, Gemini CLI, Qwen Code, Cline, and GitHub
+Copilot CLI (file-per-session), but **deliberately does not snapshot the opencode, Kilo Code, or
+Goose SQLite stores**. The `opencode-db`, `kilo`, and `goose` sources open their default databases directly in
 read-only mode
 via the `node:sqlite` shim (`readonly: true, fileMustExist: true`) and pass the handles to their
 `agent-canonical` parsers. The reasons:
@@ -340,7 +354,7 @@ Notes:
 |---|---|
 | [tests/smoke.test.ts](tests/smoke.test.ts) | CLI envelope shape, exit codes, and stdout cleanliness from source via `tsx` + `execa`. |
 | [tests/distSmoke.test.ts](tests/distSmoke.test.ts) | Packed CLI/library loading, file allowlist, Markdown links, warning behavior, and executable mode. CI also runs it on exact Node 24.0.0. |
-| [tests/canonicalSeam.test.ts](tests/canonicalSeam.test.ts) | Canonical seam smoke: Claude Code, Gemini, Qwen, and Cline fixtures flow through shared `agent-canonical` parsers into the flat `CanonicalSession` shape. |
+| [tests/canonicalSeam.test.ts](tests/canonicalSeam.test.ts) | Canonical seam smoke: Claude Code, Gemini, Qwen, Cline, and Copilot fixtures flow through shared `agent-canonical` parsers into the flat `CanonicalSession` shape. |
 | [tests/extract.test.ts](tests/extract.test.ts) | Corrections classifier for all 7 kinds. Each fact extractor on synthetic sessions: files_touched, shell_commands (wrapper stripping), tool_errors (category inference), user_corrections (preceding_turn + response_time + followed_by_revert). |
 | [tests/workflowRuns.test.ts](tests/workflowRuns.test.ts) | Lossless workflow manifest/journal ingest, derived run/phase/agent rows, session linkage, and idempotence. |
 
