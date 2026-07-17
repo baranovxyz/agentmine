@@ -2,7 +2,7 @@
 
 Agentmine (`agentmine`) is a queryable SQLite corpus of an individual
 developer's coding-agent sessions (claude-code, codex, opencode, cursor,
-gemini, qwen, kilo, goose, cline). It ingests session transcript archives,
+gemini, qwen, kilo, goose, cline, copilot). It ingests session transcript archives,
 normalizes to canonical sessions/messages/tool-calls, populates fact + pattern
 tables, and exposes
 them as an agent-friendly JSON CLI.

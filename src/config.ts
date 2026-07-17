@@ -149,6 +149,7 @@ export const paths = {
   rawGemini: join(SESSIONS_ROOT, "gemini"),
   rawQwen: join(SESSIONS_ROOT, "qwen"),
   rawCline: join(SESSIONS_ROOT, "cline"),
+  rawCopilot: join(SESSIONS_ROOT, "copilot"),
   normalized: join(SESSIONS_ROOT, "normalized"),
   transcripts: join(SESSIONS_ROOT, "transcripts"),
   summaries: join(SESSIONS_ROOT, "summaries"),
@@ -175,6 +176,8 @@ export const paths = {
   sourceQwenSessions: join(HOME, ".qwen", "projects"),
   /** Source-of-truth Cline per-session JSON store, including Cline's path overrides. */
   sourceClineSessions: resolveClineSessionsPath({ home: HOME }),
+  /** Source-of-truth GitHub Copilot CLI per-session event stream (`~/.copilot/session-state/<uuid>/events.jsonl`) */
+  sourceCopilotSessions: join(HOME, ".copilot", "session-state"),
 } as const;
 
 export const envKeys = {

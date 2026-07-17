@@ -161,12 +161,22 @@ describe("published package artifact", () => {
       parseUsageCommands(help.stdout).sort(),
     );
 
+    // Derive the expected version from package.json (single source of truth)
+    // rather than a hardcoded literal — the CLI prints src/version.ts's VERSION,
+    // so this asserts the packed CLI reports the source version AND catches
+    // version.ts drifting from package.json, with no churn on release bumps.
+    const expectedVersion = z
+      .object({ version: z.string() })
+      .parse(
+        JSON.parse(await readFile(join(REPO, "package.json"), "utf8")),
+      ).version;
+
     const version = await execa("node", [cliPath, "--version"], {
       reject: false,
       env: isolatedEnv,
     });
     expect(version.exitCode, version.stderr).toBe(0);
-    expect(version.stdout.trim()).toBe("0.3.0");
+    expect(version.stdout.trim()).toBe(expectedVersion);
     expect(version.stderr).toBe("");
 
     const forwardedWarning = await execa(
@@ -183,7 +193,7 @@ describe("published package artifact", () => {
       },
     );
     expect(forwardedWarning.exitCode, forwardedWarning.stderr).toBe(0);
-    expect(forwardedWarning.stdout.trim()).toBe("0.3.0");
+    expect(forwardedWarning.stdout.trim()).toBe(expectedVersion);
     expect(forwardedWarning.stderr).toContain(
       "AgentmineTestWarning: forwarded warning",
     );

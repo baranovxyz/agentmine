@@ -53,9 +53,13 @@ describe("build config", () => {
       "node scripts/verify-dist-manifest.mjs",
     );
     expect(pkg.devDependencies ?? {}).toHaveProperty("tsup");
-    expect(pkg.devDependencies ?? {}).toHaveProperty(
-      "agent-canonical",
-      "0.1.5",
+    // agent-canonical must be pinned to an exact published version — never
+    // `workspace:*` or a caret/tilde range — so the standalone public
+    // dependency graph is deterministic and publication-safe. Assert the pin
+    // shape, not the number, so version bumps don't churn this test.
+    expect(pkg.devDependencies ?? {}).toHaveProperty("agent-canonical");
+    expect((pkg.devDependencies ?? {})["agent-canonical"]).toMatch(
+      /^\d+\.\d+\.\d+$/u,
     );
     expect(existsSync(join(REPO, "tsup.config.ts"))).toBe(true);
   });

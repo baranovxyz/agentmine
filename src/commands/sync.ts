@@ -52,13 +52,19 @@ const TARGETS: SyncTarget[] = [
     target: paths.rawCline,
     optional: true,
   },
+  {
+    name: "copilot",
+    source: paths.sourceCopilotSessions,
+    target: paths.rawCopilot,
+    optional: true,
+  },
 ];
 
 export const syncCommand = defineCommand({
   meta: {
     name: "sync",
     description:
-      "Rsync raw agent-session archives (claude-code, cursor, codex, gemini, qwen, cline) into the app-data sessions root",
+      "Rsync raw agent-session archives (claude-code, cursor, codex, gemini, qwen, cline, copilot) into the app-data sessions root",
   },
   args: {
     "dry-run": {
