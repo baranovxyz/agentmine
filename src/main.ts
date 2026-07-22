@@ -25,7 +25,7 @@ const main = defineCommand({
     name: "agentmine",
     version: VERSION,
     description:
-      "Queryable work corpus of coding-agent sessions. Mine prior work, skills, and workflow patterns with plain SQL.",
+      "Long-term memory for your AI coding agents. One local SQLite corpus of your Claude Code / Cursor / Codex / Copilot / OpenCode sessions — resume prior work, recall how you solved something before, and reconstruct what past sessions did. Agent-first JSON CLI.",
   },
   subCommands: {
     schema: schemaCommand,

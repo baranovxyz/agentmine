@@ -259,7 +259,7 @@ GitHub Copilot CLI specific:
 
 Kilo Code specific:
 
-- Kilo Code uses an opencode-lineage SQLite schema in `~/.local/share/kilo/kilo.db`.
+- Kilo Code uses an OpenCode-lineage SQLite schema in `~/.local/share/kilo/kilo.db`.
 - `normalize --source kilo` opens the live database read-only and stamps the canonical source as
   `kilo`; a source-specific import uses `normalize` plus `extract`, not `sync`.
 
@@ -274,7 +274,7 @@ Goose specific:
 - Like Kilo Code, a source-specific Goose import uses `normalize` plus `extract`, not `sync`.
 
 An unfiltered `agentmine ingest` mirrors Cline alongside the other file-backed sources and still
-includes available opencode, Kilo Code, and Goose databases during its unfiltered `normalize`
+includes available OpenCode, Kilo Code, and Goose databases during its unfiltered `normalize`
 stage.
 
 When adding an adapter, add the parser to the `agent-canonical` package and expose a flatten
@@ -284,9 +284,9 @@ adapters by source.
 ### SQLite-backed stores are read live, not snapshotted
 
 `agentmine sync` rsyncs Claude Code, Cursor, Codex, Gemini CLI, Qwen Code, Cline, and GitHub
-Copilot CLI (file-per-session), but **deliberately does not snapshot the opencode, Kilo Code, or
-Goose SQLite stores**. The `opencode-db`, `kilo`, and `goose` sources open their default databases directly in
-read-only mode
+Copilot CLI (file-per-session), but **deliberately does not snapshot the OpenCode, Kilo Code, or
+Goose SQLite stores**. The `opencode-db`, `kilo`, and `goose` sources open their default
+databases directly in read-only mode
 via the `node:sqlite` shim (`readonly: true, fileMustExist: true`) and pass the handles to their
 `agent-canonical` parsers. The reasons:
 
@@ -297,7 +297,7 @@ via the `node:sqlite` shim (`readonly: true, fileMustExist: true`) and pass the 
 - `sessions.db` is the persistent artifact Agentmine cares about; the
   raw session archive is incidental and recoverable from the source CLI itself.
 
-The built-in sources always read the resolved standard opencode, Kilo Code, and Goose DB paths;
+The built-in sources always read the resolved standard OpenCode, Kilo Code, and Goose DB paths;
 Goose's own `GOOSE_PATH_ROOT` environment override is supported, but there is no Agentmine CLI
 override for an alternate copy. For a reproducible analysis, preserve the source DB separately or
 provide a custom extension adapter. The file-based CLI stores remain rsync-based because their
@@ -318,8 +318,9 @@ deletes only the in-scope fact rows and `scopeAnd(scope)` / `scopeWhere(scope)` 
 read. A full rebuild (`ids === null`, or `extract --force`) passes the empty fragment and clears the
 whole table, exactly as before. The corpus-aggregate extractors (subagents, ngrams, templates, and
 the `subagent_count` rollup) ignore the scope and always rebuild — their output is a function of the
-whole corpus and they are cheap once `idx_sessions_parent` exists. `tests/incrementalExtract.test.ts`
-pins the invariant: a scoped rebuild of a changed session equals a full rebuild.
+whole corpus and they are cheap once `idx_sessions_parent` exists.
+`tests/incrementalExtract.test.ts` pins the invariant: a scoped rebuild of a changed session
+equals a full rebuild.
 
 Adding an extractor:
 

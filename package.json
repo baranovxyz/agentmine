@@ -11,8 +11,8 @@
     "vitest": "^3.2.7"
   },
   "name": "agentmine",
-  "version": "0.5.0",
-  "description": "Queryable work corpus of coding-agent sessions",
+  "version": "0.6.0",
+  "description": "Long-term memory for your AI coding agents. Agentmine turns local Claude Code, Cursor, Codex, Copilot, Gemini & OpenCode session transcripts into a searchable SQLite corpus — resume prior work, recall how you solved something before, and reconstruct what past sessions did.",
   "keywords": [
     "coding-agent",
     "agent-sessions",
@@ -30,7 +30,18 @@
     "qwen",
     "cline",
     "copilot",
-    "cli"
+    "cli",
+    "ai-coding-assistant",
+    "agent-memory",
+    "context-recovery",
+    "resume-session",
+    "session-search",
+    "transcript-search",
+    "prior-work-retrieval",
+    "agent-observability",
+    "local-first",
+    "developer-tools",
+    "agentskills"
   ],
   "license": "MIT",
   "repository": {
@@ -45,10 +56,12 @@
   "bin": {
     "agentmine": "./dist/cli.js"
   },
+  "agentskills": "./skills/using-agentmine/SKILL.md",
   "files": [
     "dist",
     "CHANGELOG.md",
-    "guide"
+    "guide",
+    "skills"
   ],
   "scripts": {
     "build": "rm -rf dist && tsup && node scripts/strip-bundle-provenance.js && chmod +x dist/cli.js",
