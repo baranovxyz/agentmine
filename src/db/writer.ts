@@ -191,6 +191,74 @@ export function upsertSession(
       }
     });
   }
+
+  // Mark this session for incremental `extract`. The insert shares the caller's
+  // per-batch transaction, so a session becomes extract-dirty atomically with
+  // its canonical rows.
+  markSessionDirty(db, session.id);
+}
+
+/** Flag one session as needing (re)extraction. */
+export function markSessionDirty(db: DatabaseType, sessionId: string): void {
+  db.prepare(
+    `INSERT OR IGNORE INTO dirty_sessions (session_id) VALUES (?)`,
+  ).run(sessionId);
+}
+
+/** The session ids awaiting extraction, oldest-insert first. */
+export function getDirtySessions(db: DatabaseType): string[] {
+  return db
+    .prepare<[], { session_id: string }>(
+      `SELECT session_id FROM dirty_sessions`,
+    )
+    .all()
+    .map((r) => r.session_id);
+}
+
+/** Clear the given session ids from the dirty set (post-extract). */
+export function clearDirtySessions(
+  db: DatabaseType,
+  ids: readonly string[],
+): void {
+  const del = db.prepare(`DELETE FROM dirty_sessions WHERE session_id = ?`);
+  const tx = db.transaction(() => {
+    for (const id of ids) del.run(id);
+  });
+  tx();
+}
+
+/** Empty the dirty set entirely (after a full rebuild). */
+export function clearAllDirtySessions(db: DatabaseType): void {
+  db.prepare(`DELETE FROM dirty_sessions`).run();
+}
+
+export interface FileStat {
+  mtimeMs: number;
+  size: number;
+}
+
+/** The `(mtime, size)` of every source file recorded on a prior normalize. */
+export function loadFileStatCache(db: DatabaseType): Map<string, FileStat> {
+  const rows = db
+    .prepare<[], { path: string; mtime_ms: number; size: number }>(
+      `SELECT path, mtime_ms, size FROM file_stat_cache`,
+    )
+    .all();
+  const map = new Map<string, FileStat>();
+  for (const r of rows) map.set(r.path, { mtimeMs: r.mtime_ms, size: r.size });
+  return map;
+}
+
+/** Remember a file's `(mtime, size)` so an unchanged re-run can skip its parse. */
+export function recordFileStat(
+  db: DatabaseType,
+  path: string,
+  stat: FileStat,
+): void {
+  db.prepare(
+    `INSERT INTO file_stat_cache (path, mtime_ms, size) VALUES (?, ?, ?)
+     ON CONFLICT(path) DO UPDATE SET mtime_ms = excluded.mtime_ms, size = excluded.size`,
+  ).run(path, stat.mtimeMs, stat.size);
 }
 
 export function deleteSession(db: DatabaseType, sessionId: string): void {

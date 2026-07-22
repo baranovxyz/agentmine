@@ -11,7 +11,7 @@
     "vitest": "^3.2.7"
   },
   "name": "agentmine",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Queryable work corpus of coding-agent sessions",
   "keywords": [
     "coding-agent",

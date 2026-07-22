@@ -1,5 +1,6 @@
 import type { DatabaseType } from "../db/client.js";
 import { slugFromSkillDirectory } from "./parseSkillListing.js";
+import { type ExtractScope, scopeAnd, scopedDelete } from "./scope.js";
 
 const HOOK_PREAMBLE = /^Base directory for this skill:\s*(\S+)/m;
 
@@ -8,15 +9,18 @@ const HOOK_PREAMBLE = /^Base directory for this skill:\s*(\S+)/m;
  * (full SKILL.md echoed as a user turn). These count as "used" even when
  * no explicit Skill tool call landed in tool_calls.
  */
-export function extractSkillsHookInjected(db: DatabaseType): number {
-  db.prepare(`DELETE FROM skills_hook_injected`).run();
+export function extractSkillsHookInjected(
+  db: DatabaseType,
+  scope: ExtractScope,
+): number {
+  scopedDelete(db, scope, "skills_hook_injected");
 
   const rows = db
     .prepare<[], { session_id: string; turn: number; text: string }>(
       `SELECT session_id, turn, text
          FROM messages
         WHERE role = 'user'
-          AND text LIKE 'Base directory for this skill:%'`,
+          AND text LIKE 'Base directory for this skill:%'${scopeAnd(scope)}`,
     )
     .all();
 

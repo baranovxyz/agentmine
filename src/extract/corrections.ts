@@ -1,6 +1,7 @@
 import type { DatabaseType, Statement } from "../db/client.js";
 import { withLlmPreservation } from "./llmPreserve.js";
 import { isInjectedNoise } from "./noiseFilter.js";
+import { type ExtractScope, scopedDelete, scopeWhere } from "./scope.js";
 
 /**
  * user_corrections: every user turn (other than the first) that pushes back
@@ -84,17 +85,20 @@ interface SessionRow {
  * session; classifies them; resolves `preceding_turn` (previous assistant turn),
  * `preceding_tool_calls`, `response_time_ms`, and `followed_by_revert`.
  */
-export function extractUserCorrections(db: DatabaseType): number {
+export function extractUserCorrections(
+  db: DatabaseType,
+  scope: ExtractScope,
+): number {
   withLlmPreservation(
     db,
     "user_corrections",
     ["session_id", "turn"],
     ["kind_llm", "kind_llm_source"],
     () => {
-      db.prepare(`DELETE FROM user_corrections`).run();
+      scopedDelete(db, scope, "user_corrections");
       const sessions = db
         .prepare<[], SessionRow>(
-          `SELECT id, source, project_path FROM sessions`,
+          `SELECT id, source, project_path FROM sessions${scopeWhere(scope, "id")}`,
         )
         .all();
       const insert = db.prepare(

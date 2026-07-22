@@ -8,6 +8,7 @@ import { extractGitOperations } from "./git.js";
 import { extractUserInterruptions } from "./interrupts.js";
 import { extractMcpCalls } from "./mcp.js";
 import { extractToolCallNgrams } from "./ngrams.js";
+import { type ExtractScope, runScoped } from "./scope.js";
 import { extractSearchCalls } from "./search.js";
 import { extractSelfResolutions } from "./selfResolutions.js";
 import { extractShellCommands } from "./shell.js";
@@ -48,39 +49,55 @@ export interface ExtractorResult {
  * Run every extractor in order. Each extractor manages its own DELETE + INSERT
  * within its own transaction so re-runs are idempotent.
  *
+ * `sessionIds` bounds the per-session extractors to a changed set (incremental
+ * mode); `null` rebuilds the whole corpus. The corpus-aggregate extractors
+ * (subagents, ngrams, templates, and the subagent-count rollup) always rebuild
+ * fully — their output is a function of the entire corpus and they are cheap.
+ *
  * Order is significant for two extractors:
  *   - corrections.ts reads `shell_commands` for `followed_by_revert`, so shell must run first.
  *   - git.ts reads `shell_commands` for the cmd_head='git' filter, so shell must run first.
  *   - friction.ts reads `shell_commands`, `files_touched`, and `tool_calls`; runs after them.
  *   - ngrams.ts and templates.ts only read `tool_calls` / `sessions`; order-independent.
  */
-export function runAllExtractors(db: DatabaseType): ExtractorResult {
-  const files_touched = extractFilesTouched(db);
-  const shell_commands = extractShellCommands(db);
-  const tool_errors = extractToolErrors(db);
-  const skills_invoked = extractSkillsInvoked(db);
-  const skills_available = extractSkillsAvailable(db);
-  const skills_hook_injected = extractSkillsHookInjected(db);
-  const mcp_calls = extractMcpCalls(db);
-  const web_fetches = extractWebFetches(db);
-  const git_operations = extractGitOperations(db);
-  const todo_events = extractTodoEvents(db);
-  const user_interruptions = extractUserInterruptions(db);
+export function runAllExtractors(
+  db: DatabaseType,
+  sessionIds: readonly string[] | null = null,
+): ExtractorResult {
+  return runScoped(db, sessionIds, (scope) => runExtractors(db, scope));
+}
+
+function runExtractors(db: DatabaseType, scope: ExtractScope): ExtractorResult {
+  const files_touched = extractFilesTouched(db, scope);
+  const shell_commands = extractShellCommands(db, scope);
+  const tool_errors = extractToolErrors(db, scope);
+  const skills_invoked = extractSkillsInvoked(db, scope);
+  const skills_available = extractSkillsAvailable(db, scope);
+  const skills_hook_injected = extractSkillsHookInjected(db, scope);
+  const mcp_calls = extractMcpCalls(db, scope);
+  const web_fetches = extractWebFetches(db, scope);
+  const git_operations = extractGitOperations(db, scope);
+  const todo_events = extractTodoEvents(db, scope);
+  const user_interruptions = extractUserInterruptions(db, scope);
+  // Corpus-aggregate: parent/child linkage spans sessions, so always full.
   const subagent_invocations = extractSubagentInvocations(db);
-  const user_corrections = extractUserCorrections(db);
+  const user_corrections = extractUserCorrections(db, scope);
+  // Corpus-aggregate: sequence/template frequencies span the whole corpus.
   const tool_call_ngrams = extractToolCallNgrams(db);
   const prompt_templates = extractPromptTemplates(db);
-  const friction_events = extractFrictionEvents(db);
-  const self_resolutions = extractSelfResolutions(db);
-  const search_calls = extractSearchCalls(db);
+  const friction_events = extractFrictionEvents(db, scope);
+  const self_resolutions = extractSelfResolutions(db, scope);
+  const search_calls = extractSearchCalls(db, scope);
   // Derives workflow_runs / workflow_agents / workflow_run_phases from the raw
   // workflow tables (populated by normalize); resolves session links against
   // the sessions already present.
   const workflow_runs = extractWorkflowRuns(db);
 
   // Post-extract passes that depend on fact tables being fully populated.
-  const commit_status = extractCommitStatus(db);
-  // Populate has_subagents / subagent_count from child sessions.
+  const commit_status = extractCommitStatus(db, scope);
+  // Populate has_subagents / subagent_count from child sessions. A newly
+  // (re)imported child can change its parent's counts even when the parent
+  // is not itself in scope, so this rollup always spans the whole corpus.
   // Using sessions.parent_session_id (not subagent_invocations) so CC subagents
   // linked via filesystem are counted even when no Task tool call was recorded.
   db.prepare(

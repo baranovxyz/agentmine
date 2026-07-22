@@ -1,5 +1,6 @@
 import type { DatabaseType } from "../db/client.js";
 import { parseSkillListingContent } from "./parseSkillListing.js";
+import { type ExtractScope, scopeAnd, scopedDelete } from "./scope.js";
 
 interface RawEventRow {
   session_id: string;
@@ -20,13 +21,16 @@ const SKILL_LISTING_MARKER =
  * Union semantics: if a skill appears in multiple listings mid-session,
  * keep the latest description (last source_seq wins on INSERT OR REPLACE).
  */
-export function extractSkillsAvailable(db: DatabaseType): number {
-  db.prepare(`DELETE FROM skills_available`).run();
+export function extractSkillsAvailable(
+  db: DatabaseType,
+  scope: ExtractScope,
+): number {
+  scopedDelete(db, scope, "skills_available");
 
   const ccSessions = new Set(
     db
       .prepare<[], { id: string }>(
-        `SELECT id FROM sessions WHERE source = 'claude-code'`,
+        `SELECT id FROM sessions WHERE source = 'claude-code'${scopeAnd(scope, "id")}`,
       )
       .all()
       .map((r) => r.id),
@@ -37,11 +41,11 @@ export function extractSkillsAvailable(db: DatabaseType): number {
     .prepare<[string], RawEventRow>(
       `SELECT session_id, seq, raw_json
          FROM raw_events
-        WHERE CASE
+        WHERE (CASE
                 WHEN json_valid(raw_json)
                 THEN json_extract(raw_json, '$.attachment.type')
               END = 'skill_listing'
-           OR raw_json LIKE '%' || ? || '%'
+           OR raw_json LIKE '%' || ? || '%')${scopeAnd(scope)}
         ORDER BY session_id, seq`,
     )
     .all(SKILL_LISTING_MARKER);

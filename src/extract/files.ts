@@ -1,4 +1,5 @@
 import type { DatabaseType } from "../db/client.js";
+import { type ExtractScope, scopeAnd, scopedDelete } from "./scope.js";
 
 /**
  * files_touched: one row per file operation extracted from tool_calls.
@@ -49,13 +50,16 @@ interface ToolCallRow {
   args_json: string | null;
 }
 
-export function extractFilesTouched(db: DatabaseType): number {
-  db.prepare(`DELETE FROM files_touched`).run();
+export function extractFilesTouched(
+  db: DatabaseType,
+  scope: ExtractScope,
+): number {
+  scopedDelete(db, scope, "files_touched");
   const rows = db
     .prepare<[string[]], ToolCallRow>(
       `SELECT session_id, turn, name, args_json
          FROM tool_calls
-        WHERE name IN (${TRACKED_TOOLS.map(() => "?").join(",")})`,
+        WHERE name IN (${TRACKED_TOOLS.map(() => "?").join(",")})${scopeAnd(scope)}`,
     )
     .all(TRACKED_TOOLS);
 

@@ -37,7 +37,13 @@ import {
 } from "../db/client.js";
 import { withWriteLock } from "../db/lock.js";
 import { Database } from "../db/sqlite.js";
-import { sessionIsUpToDate, upsertSession } from "../db/writer.js";
+import {
+  type FileStat,
+  loadFileStatCache,
+  recordFileStat,
+  sessionIsUpToDate,
+  upsertSession,
+} from "../db/writer.js";
 import { loadExtensions } from "../extensions.js";
 import {
   getProjectPathAllowFromEnv,
@@ -259,6 +265,7 @@ export const normalizeCommand = defineCommand({
                 processed: 0,
                 processed_by_source: {},
                 skipped_up_to_date: 0,
+                skipped_unchanged: 0,
                 skipped_empty: 0,
                 skipped_by_filter: 0,
                 failed: 0,
@@ -314,12 +321,53 @@ export const normalizeCommand = defineCommand({
           const failures: Array<{ path: string; error: string }> = [];
 
           let scanned = 0;
+          let skippedUnchanged = 0;
+          // Cheap pre-filter: skip the full parse+hash of files whose bytes are
+          // unchanged since a prior cache-consistent import. `--force` ignores
+          // it; `--dry-run` neither reads nor writes it (it reports over the
+          // full corpus and holds a readonly handle).
+          const statCache: Map<string, FileStat> =
+            args.force || dryRun ? new Map() : loadFileStatCache(db);
           const BATCH = 50;
           for (const { source, files } of fileSets) {
+            // The Codex lineage backfill must reparse unchanged Codex files, so
+            // the stat pre-filter is disabled for that source while it runs.
+            const statSkipEnabled =
+              !args.force && !(codexLineageBackfill && source.name === "codex");
             for (let start = 0; start < files.length; start += BATCH) {
               const batch = files.slice(start, start + BATCH);
-              const parsed = await Promise.all(
+
+              // Stat every file once (also reused to refresh the cache below).
+              // The stat folds in freshness siblings (e.g. Cline's metadata
+              // `.json`) so a sibling-only change still invalidates the entry.
+              const stats = new Map<string, FileStat | null>();
+              await Promise.all(
                 batch.map(async (file) => {
+                  stats.set(
+                    file,
+                    await combinedFreshnessStat(file, source.freshnessSiblings),
+                  );
+                }),
+              );
+
+              const toParse = batch.filter((file) => {
+                if (!statSkipEnabled) return true;
+                const st = stats.get(file);
+                const cached = st ? statCache.get(file) : undefined;
+                if (
+                  st &&
+                  cached &&
+                  cached.mtimeMs === st.mtimeMs &&
+                  cached.size === st.size
+                ) {
+                  skippedUnchanged += 1;
+                  return false;
+                }
+                return true;
+              });
+
+              const parsed = await Promise.all(
+                toParse.map(async (file) => {
                   try {
                     return {
                       file,
@@ -338,6 +386,7 @@ export const normalizeCommand = defineCommand({
 
               const upsert = db.transaction(() => {
                 for (const { file, session, parseError } of parsed) {
+                  const st = stats.get(file) ?? null;
                   if (parseError) {
                     failed += 1;
                     failures.push({
@@ -348,6 +397,9 @@ export const normalizeCommand = defineCommand({
                   }
                   if (!session) {
                     skippedEmpty += 1;
+                    // An empty file is a stable outcome; cache it so unchanged
+                    // re-runs skip the parse. It re-parses if its bytes change.
+                    if (!dryRun && st) recordFileStat(db, file, st);
                     continue;
                   }
                   if (
@@ -356,6 +408,8 @@ export const normalizeCommand = defineCommand({
                       projectPathAllow,
                     )
                   ) {
+                    // Deliberately NOT cached: the allow-filter is env-driven,
+                    // so a filtered file must be re-evaluated next run.
                     skippedByFilter += 1;
                     continue;
                   }
@@ -365,6 +419,7 @@ export const normalizeCommand = defineCommand({
                     sessionIsUpToDate(db, session.id, session.contentHash)
                   ) {
                     skippedCached += 1;
+                    if (!dryRun && st) recordFileStat(db, file, st);
                     continue;
                   }
                   if (redact) {
@@ -387,6 +442,7 @@ export const normalizeCommand = defineCommand({
                     processed += 1;
                     processedBySource[session.source] =
                       (processedBySource[session.source] ?? 0) + 1;
+                    if (st) recordFileStat(db, file, st);
                   } catch (e) {
                     failed += 1;
                     failures.push({
@@ -405,6 +461,7 @@ export const normalizeCommand = defineCommand({
                 total: totalFiles,
                 processed,
                 skippedCached,
+                skippedUnchanged,
                 skippedEmpty,
                 skippedByFilter,
                 failed,
@@ -452,6 +509,7 @@ export const normalizeCommand = defineCommand({
           reportProgressImmediate("normalize.done", {
             processed,
             skippedCached,
+            skippedUnchanged,
             skippedEmpty,
             skippedByFilter,
             failed,
@@ -476,6 +534,7 @@ export const normalizeCommand = defineCommand({
               processed,
               processed_by_source: processedBySource,
               skipped_up_to_date: skippedCached,
+              skipped_unchanged: skippedUnchanged,
               skipped_empty: skippedEmpty,
               skipped_by_filter: skippedByFilter,
               failed,
@@ -576,6 +635,37 @@ function missingInputRecovery(sources: SourceConfig[]): string {
       ? lastAction
       : `${actions.slice(0, -1).join(", ")}, and ${lastAction}`;
   return `${guidance.charAt(0).toUpperCase()}${guidance.slice(1)}.`;
+}
+
+/**
+ * The `(mtime, size)` of a source file, folding in its freshness siblings so a
+ * sibling-only change (e.g. Cline's metadata `.json` next to an unchanged
+ * `.messages.json`) still invalidates the stat-cache entry. `mtime` is the max
+ * and `size` the sum across the file and its present siblings. Returns `null`
+ * when the primary file cannot be stat'd (non-path DB session IDs, races).
+ */
+export async function combinedFreshnessStat(
+  file: string,
+  freshnessSiblings?: (filePath: string) => string[],
+): Promise<FileStat | null> {
+  let primary: Awaited<ReturnType<typeof stat>>;
+  try {
+    primary = await stat(file);
+  } catch {
+    return null;
+  }
+  let mtimeMs = Math.round(primary.mtimeMs);
+  let size = primary.size;
+  for (const sibling of freshnessSiblings?.(file) ?? []) {
+    try {
+      const st = await stat(sibling);
+      mtimeMs = Math.max(mtimeMs, Math.round(st.mtimeMs));
+      size += st.size;
+    } catch {
+      // Optional freshness siblings may be absent.
+    }
+  }
+  return { mtimeMs, size };
 }
 
 /**

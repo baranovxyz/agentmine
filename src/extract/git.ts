@@ -1,4 +1,5 @@
 import type { DatabaseType } from "../db/client.js";
+import { type ExtractScope, scopeAnd, scopedDelete } from "./scope.js";
 
 /**
  * git_operations: derived from `shell_commands` where `cmd_head = 'git'`.
@@ -45,12 +46,15 @@ interface ShellRow {
   exit_code: number | null;
 }
 
-export function extractGitOperations(db: DatabaseType): number {
-  db.prepare(`DELETE FROM git_operations`).run();
+export function extractGitOperations(
+  db: DatabaseType,
+  scope: ExtractScope,
+): number {
+  scopedDelete(db, scope, "git_operations");
 
   const rows = db
     .prepare<[], ShellRow>(
-      `SELECT session_id, turn, idx, cmd_full, exit_code FROM shell_commands WHERE cmd_head = 'git'`,
+      `SELECT session_id, turn, idx, cmd_full, exit_code FROM shell_commands WHERE cmd_head = 'git'${scopeAnd(scope)}`,
     )
     .all();
 

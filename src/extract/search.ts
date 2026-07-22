@@ -1,4 +1,5 @@
 import type { DatabaseType } from "../db/client.js";
+import { type ExtractScope, scopeAnd, scopedDelete } from "./scope.js";
 
 /**
  * search_calls: one row per workspace lookup (grep / glob).
@@ -30,8 +31,11 @@ interface ToolCallRow {
   args_json: string | null;
 }
 
-export function extractSearchCalls(db: DatabaseType): number {
-  db.prepare(`DELETE FROM search_calls`).run();
+export function extractSearchCalls(
+  db: DatabaseType,
+  scope: ExtractScope,
+): number {
+  scopedDelete(db, scope, "search_calls");
 
   const rows = db
     .prepare<[string[]], ToolCallRow>(
@@ -39,7 +43,7 @@ export function extractSearchCalls(db: DatabaseType): number {
          FROM tool_calls
         WHERE name IN (${Object.keys(TOOL_TO_KIND)
           .map(() => "?")
-          .join(",")})`,
+          .join(",")})${scopeAnd(scope)}`,
     )
     .all(Object.keys(TOOL_TO_KIND));
 

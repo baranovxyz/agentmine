@@ -3,6 +3,16 @@
 Notable Agentmine changes only. Keep this file short; detailed implementation notes belong in
 commit history and release notes.
 
+## 0.5.0 - 2026-07-22
+
+- `extract` is now incremental: `normalize` marks changed sessions dirty and `extract` rebuilds
+  only their fact rows (`--force` still does a full rebuild). A no-op `extract` drops from ~minutes
+  to milliseconds on a large corpus; full-rebuild output is unchanged.
+- `normalize` skips parsing files whose `(mtime, size)` are unchanged since the last import, instead
+  of parsing every file just to recompute the content hash. Adds `skipped_unchanged` to the receipt.
+- Add an index on `sessions(parent_session_id)`; the subagent-count rollup and `sessions --parent`
+  no longer do a full-table scan per session.
+
 ## 0.4.0 - 2026-07-17
 
 - Ingest GitHub Copilot CLI sessions from the per-session `events.jsonl` event stream

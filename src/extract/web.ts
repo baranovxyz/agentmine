@@ -1,4 +1,5 @@
 import type { DatabaseType } from "../db/client.js";
+import { type ExtractScope, scopedDelete, scopeWhere } from "./scope.js";
 
 /**
  * web_fetches: one row per WebFetch / WebSearch / browser_navigate call.
@@ -27,12 +28,15 @@ interface ToolCallRow {
   args_json: string | null;
 }
 
-export function extractWebFetches(db: DatabaseType): number {
-  db.prepare(`DELETE FROM web_fetches`).run();
+export function extractWebFetches(
+  db: DatabaseType,
+  scope: ExtractScope,
+): number {
+  scopedDelete(db, scope, "web_fetches");
 
   const rows = db
     .prepare<[], ToolCallRow>(
-      `SELECT session_id, turn, idx, name, args_json FROM tool_calls`,
+      `SELECT session_id, turn, idx, name, args_json FROM tool_calls${scopeWhere(scope)}`,
     )
     .all();
 

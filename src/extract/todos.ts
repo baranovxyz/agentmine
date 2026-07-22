@@ -1,4 +1,5 @@
 import type { DatabaseType } from "../db/client.js";
+import { type ExtractScope, scopeAnd, scopedDelete } from "./scope.js";
 
 /**
  * todo_events: counts a TodoWrite call's status distribution at the moment
@@ -13,8 +14,11 @@ interface ToolCallRow {
   args_json: string | null;
 }
 
-export function extractTodoEvents(db: DatabaseType): number {
-  db.prepare(`DELETE FROM todo_events`).run();
+export function extractTodoEvents(
+  db: DatabaseType,
+  scope: ExtractScope,
+): number {
+  scopedDelete(db, scope, "todo_events");
 
   // Cross-source tool names:
   //   claude-code: TodoWrite       (args.todos[].status)
@@ -24,7 +28,7 @@ export function extractTodoEvents(db: DatabaseType): number {
     .prepare<[], ToolCallRow>(
       `SELECT session_id, turn, idx, args_json
          FROM tool_calls
-        WHERE name IN ('TodoWrite', 'todo_write', 'todoWrite', 'todowrite', 'update_plan')`,
+        WHERE name IN ('TodoWrite', 'todo_write', 'todoWrite', 'todowrite', 'update_plan')${scopeAnd(scope)}`,
     )
     .all();
 

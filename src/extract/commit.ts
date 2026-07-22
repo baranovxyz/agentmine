@@ -1,4 +1,5 @@
 import type { DatabaseType } from "../db/client.js";
+import { type ExtractScope, scopeWhere } from "./scope.js";
 
 /**
  * Post-extract pass: populate ended_with_commit and ended_with_commit_attempted.
@@ -9,10 +10,13 @@ import type { DatabaseType } from "../db/client.js";
  *
  * Must run after extractShellCommands.
  */
-export function extractCommitStatus(db: DatabaseType): number {
-  // Reset both flags before repopulating.
+export function extractCommitStatus(
+  db: DatabaseType,
+  scope: ExtractScope,
+): number {
+  // Reset both flags before repopulating (in-scope sessions only).
   db.prepare(
-    `UPDATE sessions SET ended_with_commit = 0, ended_with_commit_attempted = 0`,
+    `UPDATE sessions SET ended_with_commit = 0, ended_with_commit_attempted = 0${scopeWhere(scope, "id")}`,
   ).run();
 
   interface SessionRow {
@@ -24,7 +28,9 @@ export function extractCommitStatus(db: DatabaseType): number {
   }
 
   const sessions = db
-    .prepare<[], SessionRow>(`SELECT id, source FROM sessions`)
+    .prepare<[], SessionRow>(
+      `SELECT id, source FROM sessions${scopeWhere(scope, "id")}`,
+    )
     .all();
 
   const latestCommit = db.prepare<[string], CommitRow>(
