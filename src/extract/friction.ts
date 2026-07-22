@@ -1,5 +1,11 @@
 import type { DatabaseType } from "../db/client.js";
 import { withLlmPreservation } from "./llmPreserve.js";
+import {
+  type ExtractScope,
+  scopeAnd,
+  scopedDelete,
+  scopeWhere,
+} from "./scope.js";
 
 /**
  * friction_events: heuristic markers of agent struggle.
@@ -40,7 +46,10 @@ interface MessageTurn {
   role: string;
 }
 
-export function extractFrictionEvents(db: DatabaseType): number {
+export function extractFrictionEvents(
+  db: DatabaseType,
+  scope: ExtractScope,
+): number {
   let inserted = 0;
   withLlmPreservation(
     db,
@@ -48,7 +57,7 @@ export function extractFrictionEvents(db: DatabaseType): number {
     ["session_id", "turn", "idx"],
     ["type_llm", "type_llm_source"],
     () => {
-      db.prepare(`DELETE FROM friction_events`).run();
+      scopedDelete(db, scope, "friction_events");
       const insert = db.prepare(
         `INSERT OR IGNORE INTO friction_events (session_id, turn, idx, type, context)
          VALUES (?, ?, ?, ?, ?)`,
@@ -56,10 +65,10 @@ export function extractFrictionEvents(db: DatabaseType): number {
       const tx = db.transaction(() => {
         let cursor = 0;
         const next = () => cursor++;
-        inserted += detectRetrySameCmd(db, insert, next);
-        inserted += detectRepeatedFileRead(db, insert, next);
-        inserted += detectToolErrorLoop(db, insert, next);
-        inserted += detectLongUnproductiveChain(db, insert, next);
+        inserted += detectRetrySameCmd(db, scope, insert, next);
+        inserted += detectRepeatedFileRead(db, scope, insert, next);
+        inserted += detectToolErrorLoop(db, scope, insert, next);
+        inserted += detectLongUnproductiveChain(db, scope, insert, next);
       });
       tx();
     },
@@ -77,12 +86,13 @@ type Inserter = (
 
 function detectRetrySameCmd(
   db: DatabaseType,
+  scope: ExtractScope,
   insertStmt: { run: Inserter },
   next: () => number,
 ): number {
   const rows = db
     .prepare<[], ShellRow>(
-      `SELECT session_id, turn, idx, cmd_full, exit_code FROM shell_commands
+      `SELECT session_id, turn, idx, cmd_full, exit_code FROM shell_commands${scopeWhere(scope)}
        ORDER BY session_id, turn, idx`,
     )
     .all();
@@ -114,12 +124,13 @@ function detectRetrySameCmd(
 
 function detectRepeatedFileRead(
   db: DatabaseType,
+  scope: ExtractScope,
   insertStmt: { run: Inserter },
   next: () => number,
 ): number {
   const rows = db
     .prepare<[], FilesRow>(
-      `SELECT session_id, turn, path FROM files_touched WHERE op = 'read'`,
+      `SELECT session_id, turn, path FROM files_touched WHERE op = 'read'${scopeAnd(scope)}`,
     )
     .all();
   const counts = new Map<string, { turn: number; n: number }>();
@@ -150,12 +161,13 @@ function detectRepeatedFileRead(
 
 function detectToolErrorLoop(
   db: DatabaseType,
+  scope: ExtractScope,
   insertStmt: { run: Inserter },
   next: () => number,
 ): number {
   const rows = db
     .prepare<[], ToolCallRow>(
-      `SELECT session_id, turn, idx, name, exit_code FROM tool_calls
+      `SELECT session_id, turn, idx, name, exit_code FROM tool_calls${scopeWhere(scope)}
        ORDER BY session_id, turn, idx`,
     )
     .all();
@@ -205,11 +217,14 @@ function detectToolErrorLoop(
 
 function detectLongUnproductiveChain(
   db: DatabaseType,
+  scope: ExtractScope,
   insertStmt: { run: Inserter },
   next: () => number,
 ): number {
   const sessions = db
-    .prepare<[], { id: string }>(`SELECT id FROM sessions`)
+    .prepare<[], { id: string }>(
+      `SELECT id FROM sessions${scopeWhere(scope, "id")}`,
+    )
     .all();
   let n = 0;
   for (const s of sessions) {

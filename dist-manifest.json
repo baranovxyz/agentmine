@@ -11,7 +11,7 @@
     },
     {
       "path": "cli.js",
-      "sha256": "ea187d489e07caa747e894ca14b952040c866399fec6b7b4ede8f8ec77bbd5bf",
+      "sha256": "7e1cbed34c86fe607f51b1e356f04a8af2e993d65ac554c05557785782248eb5",
       "size": 418,
       "executable": true
     },
@@ -22,9 +22,9 @@
       "executable": false
     },
     {
-      "path": "main-MQGKWIZ7.js",
-      "sha256": "110ec4a1aed7d11e365b4f849846100e18c383e1e13d807625cf0c97a5df610a",
-      "size": 287225,
+      "path": "main-WD3DOCRS.js",
+      "sha256": "8ee2020317b6a0a8e7d5ceb91af80f9d8d3928ae0d28300f76b98fb5c6c5670f",
+      "size": 294708,
       "executable": false
     }
   ]

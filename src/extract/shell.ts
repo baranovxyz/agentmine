@@ -1,4 +1,5 @@
 import type { DatabaseType } from "../db/client.js";
+import { type ExtractScope, scopeAnd, scopedDelete } from "./scope.js";
 
 /**
  * shell_commands: one row per Bash/Shell invocation.
@@ -36,13 +37,16 @@ interface ToolCallRow {
   duration_ms: number | null;
 }
 
-export function extractShellCommands(db: DatabaseType): number {
-  db.prepare(`DELETE FROM shell_commands`).run();
+export function extractShellCommands(
+  db: DatabaseType,
+  scope: ExtractScope,
+): number {
+  scopedDelete(db, scope, "shell_commands");
   const rows = db
     .prepare<[string[]], ToolCallRow>(
       `SELECT session_id, turn, idx, args_json, exit_code, duration_ms
          FROM tool_calls
-        WHERE name IN (${SHELL_TOOL_NAMES.map(() => "?").join(",")})`,
+        WHERE name IN (${SHELL_TOOL_NAMES.map(() => "?").join(",")})${scopeAnd(scope)}`,
     )
     .all(SHELL_TOOL_NAMES as unknown as string[]);
 

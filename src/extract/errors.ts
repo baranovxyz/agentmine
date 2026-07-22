@@ -1,5 +1,6 @@
 import type { DatabaseType } from "../db/client.js";
 import { withLlmPreservation } from "./llmPreserve.js";
+import { type ExtractScope, scopeAnd, scopedDelete } from "./scope.js";
 
 /**
  * tool_errors: one row per failed tool_call (exit_code != 0), with a
@@ -33,7 +34,10 @@ interface ToolCallRow {
   output_preview: string | null;
 }
 
-export function extractToolErrors(db: DatabaseType): number {
+export function extractToolErrors(
+  db: DatabaseType,
+  scope: ExtractScope,
+): number {
   let inserted = 0;
   withLlmPreservation(
     db,
@@ -41,11 +45,11 @@ export function extractToolErrors(db: DatabaseType): number {
     ["session_id", "turn", "idx"],
     ["error_category_llm", "error_category_llm_source"],
     () => {
-      db.prepare(`DELETE FROM tool_errors`).run();
+      scopedDelete(db, scope, "tool_errors");
       const rows = db
         .prepare<[], ToolCallRow>(
           `SELECT session_id, turn, idx, name, output_preview
-             FROM tool_calls WHERE exit_code != 0`,
+             FROM tool_calls WHERE exit_code != 0${scopeAnd(scope)}`,
         )
         .all();
       const insert = db.prepare(

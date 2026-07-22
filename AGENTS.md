@@ -36,6 +36,7 @@ node dist/cli.js prices sync         # load model_prices from the vendored LiteL
 node dist/cli.js prices ls            # list the loaded price table (USD per 1M tokens)
 node dist/cli.js top tokens --by model # choices: model, project, session, day, source; run `prices sync` first for USD cost
 node dist/cli.js ingest            # sync → normalize → extract
+node dist/cli.js extract           # incremental: rebuild facts for sessions changed since last run (--force for a full rebuild)
 node dist/cli.js normalize --since 1d # incremental: only parse files touched in the last day (mtime-filtered walk)
 node dist/cli.js embed --provider ollama --model nomic-embed-text --dry-run # local semantic index plan
 node dist/cli.js workflows --sort tokens # list Claude Code workflow runs (rank by started|tokens|duration|agents|name)
@@ -95,10 +96,23 @@ node dist/cli.js workflow <run_id>    # one run: rollups, ordered phases, per-ag
   treat malformed rows/lines as warnings unless the session cannot be built.
   Wire schemas should declare only fields consumed and use `.passthrough()`
   for unstable stores; canonical schemas stay stable and strict.
-- **Extractors are idempotent.** Pattern: `DELETE FROM <table> WHERE
-  session_id IN (…)` then `INSERT`. Inside one transaction. Re-running
-  `extract` on an unchanged corpus must be a no-op.
-- **Normalize is content-hash cached.** Don't bypass the cache.
+- **Extractors are idempotent and incremental.** Pattern: `DELETE FROM
+  <table> WHERE session_id IN (…)` then `INSERT`. Inside one transaction.
+  `extract` rebuilds only the sessions a preceding `normalize` marked in
+  `dirty_sessions`; use `scopedDelete` + `scopeAnd`/`scopeWhere` from
+  `extract/scope.ts` so a scoped rebuild equals a full one (`extract --force`
+  ignores the dirty set and rebuilds the whole corpus). Corpus-aggregate
+  extractors (subagents/ngrams/templates + the subagent-count rollup) ignore
+  the scope and always rebuild — keep them cheap. Re-running `extract` on an
+  unchanged corpus must be a no-op.
+- **Normalize is content-hash cached, with a stat pre-filter.** The
+  content hash (`sessionIsUpToDate`) is the source of truth for "did this
+  session change". On top of it, `file_stat_cache` records each file's
+  `(mtime, size)` so an unchanged re-run skips the parse+hash entirely
+  instead of parsing just to rediscover a cache hit — folding in freshness
+  siblings (Cline metadata) so a sibling-only change still re-parses.
+  `--force` ignores both caches; `--dry-run` uses neither. Don't bypass
+  the cache.
 - **The public dist manifest is mirror-generated.** `dist-manifest.json` exists only in the
   standalone public projection. Never hand-edit or copy it into this package source. The mirror
   builds with the frozen standalone lock and writes the metadata-free reviewed artifact manifest;
@@ -133,8 +147,9 @@ node dist/cli.js workflow <run_id>    # one run: rollups, ordered phases, per-ag
   `commands/normalize.ts` behind a `source` switch. For a file-backed source,
   also add its resolved source + mirror paths in `src/config.ts`, a `sync`
   target, public path/CLI docs, and a source-specific `ingest` workflow test.
-- **New extractor:** new file in `src/extract/`, idempotent
-  DELETE+INSERT, register in `extract/index.ts`. Add a synthetic-session
+- **New extractor:** new file in `src/extract/` exporting
+  `extract<Thing>(db, scope)`, idempotent scoped DELETE+INSERT (see
+  `extract/scope.ts`), register in `extract/index.ts`. Add a synthetic-session
   test in `tests/`.
 - **New browse command:** new file in `src/commands/`, use
   `runCommand({ command, handler })`, register in `main.ts`.

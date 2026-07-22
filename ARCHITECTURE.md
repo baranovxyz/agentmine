@@ -305,18 +305,32 @@ per-session JSONL files are cheap and natural to mirror.
 
 ## Extractor contract
 
-Each extractor in [src/extract/](src/extract/) is a pure function `(db) => count`. Must be
-idempotent: `DELETE FROM <table>` first, then insert in a transaction. The orchestrator
-[src/extract/index.ts](src/extract/index.ts) calls them in order (shell before corrections, because
-corrections reads `shell_commands` to detect `followed_by_revert`).
+Each per-session extractor in [src/extract/](src/extract/) is an idempotent function
+`(db, scope) => count`. The orchestrator [src/extract/index.ts](src/extract/index.ts) calls them in
+order (shell before corrections, because corrections reads `shell_commands` to detect
+`followed_by_revert`).
+
+**Incremental scope.** `extract` runs over only the sessions a preceding `normalize` marked dirty
+(`db/writer.ts` inserts into `dirty_sessions` on every upsert); the `extract` command clears the ids
+it processed. `runAllExtractors(db, ids)` threads an `ExtractScope`
+([src/extract/scope.ts](src/extract/scope.ts)) into each extractor: `scopedDelete(db, scope, table)`
+deletes only the in-scope fact rows and `scopeAnd(scope)` / `scopeWhere(scope)` bound each source
+read. A full rebuild (`ids === null`, or `extract --force`) passes the empty fragment and clears the
+whole table, exactly as before. The corpus-aggregate extractors (subagents, ngrams, templates, and
+the `subagent_count` rollup) ignore the scope and always rebuild — their output is a function of the
+whole corpus and they are cheap once `idx_sessions_parent` exists. `tests/incrementalExtract.test.ts`
+pins the invariant: a scoped rebuild of a changed session equals a full rebuild.
 
 Adding an extractor:
 
-1. New file `src/extract/<name>.ts` exporting `extract<Thing>(db): number`.
+1. New file `src/extract/<name>.ts` exporting `extract<Thing>(db, scope): number`. Swap the
+   table-wide `DELETE` for `scopedDelete(...)` and append `scopeAnd`/`scopeWhere` to the source read
+   (or leave it a corpus-aggregate that ignores `scope` and rebuilds fully — keep those cheap).
 2. Register in [src/extract/index.ts](src/extract/index.ts) and add a key to `ExtractorResult`.
 3. If it writes a new table, add it to both schema files (see above).
 4. Add a unit test in [tests/extract.test.ts](tests/extract.test.ts) that seeds a synthetic session
-   and asserts row counts and columns.
+   and asserts row counts and columns; extend `tests/incrementalExtract.test.ts` if the new table
+   should survive the scoped-equals-full check.
 
 ## Browse-command contract
 

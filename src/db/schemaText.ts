@@ -52,6 +52,10 @@ CREATE TABLE IF NOT EXISTS sessions (
 CREATE INDEX IF NOT EXISTS idx_sessions_source_started ON sessions(source, started_at);
 CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_path);
 CREATE INDEX IF NOT EXISTS idx_sessions_external ON sessions(source, external_id);
+-- Child lookups: the extract subagent-count rollup and \`sessions --parent\`
+-- both filter on parent_session_id; without this the rollup is a full-table
+-- correlated scan per session.
+CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id);
 
 CREATE TABLE IF NOT EXISTS messages (
   session_id TEXT NOT NULL,
@@ -439,6 +443,24 @@ CREATE TABLE IF NOT EXISTS embedding_runs (
 CREATE TABLE IF NOT EXISTS meta (
   key TEXT PRIMARY KEY,
   value TEXT
+);
+
+-- INCREMENTAL EXTRACT =================================================
+-- Sessions whose canonical rows changed since the last \`extract\`. \`normalize\`
+-- (db/writer.ts) inserts here on every upsert; \`extract\` reads this set to
+-- rebuild only the affected fact rows, then clears the ids it processed.
+CREATE TABLE IF NOT EXISTS dirty_sessions (
+  session_id TEXT PRIMARY KEY
+);
+
+-- Per-file (mtime, size) of every source file that reached a cache-consistent
+-- outcome on a prior \`normalize\`. Lets a re-run skip the full parse+hash of a
+-- file whose bytes are unchanged, instead of parsing it just to discover the
+-- content hash matches. \`normalize --force\` ignores it.
+CREATE TABLE IF NOT EXISTS file_stat_cache (
+  path TEXT PRIMARY KEY,
+  mtime_ms INTEGER NOT NULL,
+  size INTEGER NOT NULL
 );
 
 -- PRE-BAKED VIEWS =====================================================

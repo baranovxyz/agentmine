@@ -1,4 +1,5 @@
 import type { DatabaseType } from "../db/client.js";
+import { type ExtractScope, scopeAnd, scopedDelete } from "./scope.js";
 
 /**
  * self_resolutions: successful retries with their diagnostic context.
@@ -38,8 +39,11 @@ interface ReasoningSnap {
   text: string;
 }
 
-export function extractSelfResolutions(db: DatabaseType): number {
-  db.prepare(`DELETE FROM self_resolutions`).run();
+export function extractSelfResolutions(
+  db: DatabaseType,
+  scope: ExtractScope,
+): number {
+  scopedDelete(db, scope, "self_resolutions");
 
   // Find the FIRST success per (session, args_hash) that follows a failure
   // with no user turn in between. We pick the EARLIEST failure too (so a
@@ -59,7 +63,7 @@ export function extractSelfResolutions(db: DatabaseType): number {
         AND tc_ok.args_hash  = tc_fail.args_hash
         AND tc_ok.turn       > tc_fail.turn
         AND tc_ok.exit_code  = 0
-       WHERE tc_fail.exit_code != 0
+       WHERE tc_fail.exit_code != 0${scopeAnd(scope, "tc_fail.session_id")}
          AND NOT EXISTS (
            SELECT 1 FROM messages m
             WHERE m.session_id = tc_fail.session_id

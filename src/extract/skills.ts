@@ -1,4 +1,5 @@
 import type { DatabaseType } from "../db/client.js";
+import { type ExtractScope, scopedDelete, scopeWhere } from "./scope.js";
 
 /**
  * skills_invoked: one row per agent skill invocation.
@@ -17,12 +18,15 @@ interface ToolCallRow {
   args_json: string | null;
 }
 
-export function extractSkillsInvoked(db: DatabaseType): number {
-  db.prepare(`DELETE FROM skills_invoked`).run();
+export function extractSkillsInvoked(
+  db: DatabaseType,
+  scope: ExtractScope,
+): number {
+  scopedDelete(db, scope, "skills_invoked");
 
   const rows = db
     .prepare<[], ToolCallRow>(
-      `SELECT session_id, turn, idx, name, args_json FROM tool_calls`,
+      `SELECT session_id, turn, idx, name, args_json FROM tool_calls${scopeWhere(scope)}`,
     )
     .all();
 

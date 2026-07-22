@@ -1,4 +1,5 @@
 import type { DatabaseType } from "../db/client.js";
+import { type ExtractScope, scopedDelete, scopeWhere } from "./scope.js";
 
 /**
  * user_interruptions: a user turn that arrived while the agent was clearly
@@ -28,11 +29,16 @@ interface MessageRow {
   text: string;
 }
 
-export function extractUserInterruptions(db: DatabaseType): number {
-  db.prepare(`DELETE FROM user_interruptions`).run();
+export function extractUserInterruptions(
+  db: DatabaseType,
+  scope: ExtractScope,
+): number {
+  scopedDelete(db, scope, "user_interruptions");
 
   const sessions = db
-    .prepare<[], { id: string }>(`SELECT id FROM sessions`)
+    .prepare<[], { id: string }>(
+      `SELECT id FROM sessions${scopeWhere(scope, "id")}`,
+    )
     .all();
 
   const insert = db.prepare(
