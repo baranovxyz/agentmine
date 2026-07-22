@@ -3,6 +3,17 @@
 Notable Agentmine changes only. Keep this file short; detailed implementation notes belong in
 commit history and release notes.
 
+## 0.6.0 - 2026-07-22
+
+- Discovery: the package description, docs, and keywords now lead with the job — long-term memory
+  for your coding agents (resume prior work, recall how you solved something before, reconstruct a
+  past session) — so humans and their agents find Agentmine by what it does.
+- Agent-native discovery: ship a bundled `using-agentmine` skill and an `agentskills` field so a
+  coding agent in a repo that has `agentmine` installed can discover when and how to query prior
+  sessions.
+- Docs: new "Patterns you'll find" section in the guide overview, plus agent-facing pointers in
+  getting-started.
+
 ## 0.5.0 - 2026-07-22
 
 - `extract` is now incremental: `normalize` marks changed sessions dirty and `extract` rebuilds

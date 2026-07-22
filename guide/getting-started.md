@@ -47,7 +47,7 @@ agentmine ingest --source gemini
 agentmine ingest --source qwen
 agentmine ingest --source cline
 
-# Current opencode SQLite store
+# Current OpenCode SQLite store
 agentmine normalize --source opencode-db
 agentmine extract
 
@@ -64,7 +64,7 @@ agentmine stats
 
 Run only one of the six source-specific `ingest` examples. Each runs
 `sync -> normalize -> extract` for that file-based source. An unfiltered `agentmine ingest`
-imports all file-backed sources and picks up available opencode, Kilo Code, and Goose databases
+imports all file-backed sources and picks up available OpenCode, Kilo Code, and Goose databases
 during `normalize`, but expects the default Claude Code transcript directory to exist. Live SQLite
 stores are not `sync` targets; for one live-DB source, run its `normalize --source ...` command plus
 `extract` as shown above. See [The pipeline](guides/pipeline.md) for what each stage does and why
@@ -126,3 +126,13 @@ AGENTMINE_DB=/path/to/sessions.db agentmine stats
 - [The pipeline](guides/pipeline.md) explains each stage and why the pipeline is safe to rerun.
 - [CLI command overview](reference/cli.md) lists common browse, search, pipeline, and maintenance
   commands.
+- [Agent CLI contract](reference/agent-contract.md) describes the JSON envelope and error codes;
+  run `agentmine schema` to discover the contract at runtime.
+
+### For coding agents
+
+Agentmine ships a `using-agentmine` skill in the package (`skills/using-agentmine/SKILL.md`, also
+referenced from the `agentskills` field in `package.json`). A coding agent working in a repo that
+has `agentmine` installed can load it to learn when and how to query prior sessions — for example,
+before starting non-trivial work, run `agentmine similar "<task description>"` to check whether you
+solved something like it before.

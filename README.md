@@ -1,18 +1,21 @@
 # Agentmine
 
-Agentmine turns local AI coding-agent session transcript archives into a
-queryable SQLite corpus.
+Agentmine is long-term memory for your AI coding agents. It turns local session
+transcript archives into a searchable SQLite corpus, so you — or your agent —
+can resume prior work, recall how you solved something before, and reconstruct
+what a past session did.
 
 It ingests session transcripts from tools such as Claude Code, Cursor, Codex, Gemini CLI, Qwen
-Code, Kilo Code, Goose, Cline, GitHub Copilot CLI, and opencode, normalizes them into a shared
+Code, Kilo Code, Goose, Cline, GitHub Copilot CLI, and OpenCode, normalizes them into a shared
 schema, extracts useful facts, and exposes the result through an agent-friendly JSON CLI.
 
 Use it to answer questions like:
 
-- What files and commands do my agents touch most?
-- Which failed commands or tool errors repeat?
-- What corrections do I keep giving agents?
-- Have I solved a similar task before?
+- What was I working on — can I pick up where I left off?
+- Have I solved a task like this before?
+- What did that past session actually do — its decisions and outcome?
+- When did I change this, and in which session?
+- What files and commands do my agents touch most, and which errors or corrections repeat?
 - Which skills, MCP tools, or agent workflows are actually used?
 - Which sessions were user-facing roots, delegated workers, nested workers, or automatic reviews?
 
@@ -69,7 +72,7 @@ agentmine ingest --source gemini
 agentmine ingest --source qwen
 agentmine ingest --source cline
 
-# Current opencode SQLite store
+# Current OpenCode SQLite store
 agentmine normalize --source opencode-db
 agentmine extract
 
@@ -85,7 +88,7 @@ agentmine stats
 ```
 
 Run only one of the six source-specific `ingest` examples. An unfiltered `agentmine ingest` imports
-every mirrored source and directly reads available opencode, Kilo Code, and Goose databases during
+every mirrored source and directly reads available OpenCode, Kilo Code, and Goose databases during
 `normalize`, but expects the default Claude Code transcript directory to exist. For one live-DB
 source, use its `normalize --source ...` command plus `extract` as shown above.
 

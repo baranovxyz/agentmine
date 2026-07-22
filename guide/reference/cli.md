@@ -69,7 +69,7 @@ Ad-hoc SQL is read-only. Only `SELECT`, `WITH`, and `EXPLAIN` queries are accept
 | `agentmine embed --provider ollama --model nomic-embed-text --dry-run` | Plan a local semantic index without writing |
 
 `agentmine ingest --source claude-code|cursor|codex|gemini|qwen|cline` runs the three file-based
-stages for one installed CLI. Current opencode, Kilo Code, and Goose use `agentmine normalize
+stages for one installed CLI. Current OpenCode, Kilo Code, and Goose use `agentmine normalize
 --source opencode-db`, `agentmine normalize --source kilo`, or `agentmine normalize --source
 goose`, followed by `agentmine extract` for a source-specific import; their live SQLite stores are
 not `sync` targets. An unfiltered `agentmine ingest` includes available live databases during its

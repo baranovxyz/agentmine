@@ -31,8 +31,8 @@ Default paths live under Agentmine's user data directory:
 | `<sessions>/sessions.db` | SQLite corpus |
 | `<sessions>/backups/` | backup archives |
 
-Current opencode, Kilo Code, and Goose sessions are read directly from their live SQLite stores
-rather than copied into `<sessions>/`. The opencode and Kilo Code defaults are
+Current OpenCode, Kilo Code, and Goose sessions are read directly from their live SQLite stores
+rather than copied into `<sessions>/`. The OpenCode and Kilo Code defaults are
 `~/.local/share/opencode/opencode.db` and `~/.local/share/kilo/kilo.db`.
 
 Agentmine resolves the current Goose runtime location first and keeps its documented macOS location
