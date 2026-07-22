@@ -136,3 +136,6 @@ referenced from the `agentskills` field in `package.json`). A coding agent worki
 has `agentmine` installed can load it to learn when and how to query prior sessions — for example,
 before starting non-trivial work, run `agentmine similar "<task description>"` to check whether you
 solved something like it before.
+
+To wire it into Claude Code, Cursor, or another agent so it triggers on its own, see
+[Set up the agent skill](guides/agent-skill.md).
