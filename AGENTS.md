@@ -26,6 +26,7 @@ node dist/cli.js sessions --root-only --since 1d # list top-level sessions, excl
 node dist/cli.js sessions --parent '<session-id>' # list one session's direct children
 node dist/cli.js query "SELECT …"  # read-only SQL (SELECT/WITH/EXPLAIN)
 node dist/cli.js similar "task description" # find prior sessions solving similar work
+node dist/cli.js similar "today's task" --root-only --since 1d # exclude child reviewers + old work
 node dist/cli.js session <id> --turn-range 10:20 # inspect a compact slice
 node dist/cli.js schema            # inspect envelope schema, exit codes, and command registry
 node dist/cli.js schema --tables   # list database tables and views
@@ -51,7 +52,7 @@ node dist/cli.js workflow <run_id>    # one run: rollups, ordered phases, per-ag
 |---|---|
 | `src/adapters/` | Consumption seam over the shared `agent-canonical` parsers: `canonical.ts` (flatten + legacy-shape wrappers returning `CanonicalSession \| null`), `types.ts` (the flat corpus shape), and `workflowRaw.ts` (lossless raw ingest of Claude Code workflow manifests/journals into the raw workflow tables). Per-CLI format knowledge lives in the `agent-canonical` package (`src/parsers/`) — never re-implement it here. |
 | `src/extract/` | Idempotent fact + pattern extractors (`files.ts`, `shell.ts`, `search.ts`, `web.ts`, `todos.ts`, etc). Registered in `extract/index.ts`. |
-| `src/db/` | SQLite client, schema, schemaText (bundled copy), and `sqlite.ts` — the `node:sqlite` compatibility shim (the only DB-driver seam; no native dependency). `schema.sql` is the source of truth. |
+| `src/db/` | SQLite client, schema, schemaText (bundled copy), and `sqlite.ts` — the runtime-native compatibility seam over `node:sqlite` for npm/Node and `bun:sqlite` for standalone executables. `schema.sql` is the source of truth. |
 | `src/commands/` | One file per CLI subcommand. Wraps `runCommand({ command, handler })` from `contract/result.ts`. |
 | `src/contract/` | Result envelope + error catalogue. |
 | `src/cli.ts` / `src/main.ts` | Early warning-filter bootstrap / command graph and registration. |
@@ -117,6 +118,12 @@ node dist/cli.js workflow <run_id>    # one run: rollups, ordered phases, per-ag
   standalone public projection. Never hand-edit or copy it into this package source. The mirror
   builds with the frozen standalone lock and writes the metadata-free reviewed artifact manifest;
   CI and publishing must verify the final rebuilt/packed `dist/` against it.
+- **Standalone targets are explicit and complete.** Build only `bun-linux-x64-baseline`,
+  `bun-darwin-x64`, or `bun-darwin-arm64` through `scripts/build-standalone.mjs`. Native parity,
+  executable scanning, archive verification, and the complete release manifest must pass before
+  npm publication. Binary scanner exceptions must bind the exact target, detector, decoder,
+  verification state, raw-value SHA-256, byte length, and occurrence count; never exclude a whole
+  detector or print matched bytes.
 - **JSON envelope is the contract.** Every command emits one JSON
   line on stdout matching the shape in `guide/reference/agent-contract.md`.
   Progress goes to stderr as NDJSON.

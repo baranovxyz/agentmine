@@ -3,16 +3,16 @@ title: Getting started
 description: Install Agentmine and run the first sync, normalize, and extract pipeline.
 ---
 
-**Agentmine** (`agentmine`) needs Node.js 24+. This page covers installing it and running the first
-import.
+**Agentmine** (`agentmine`) is available as a Node.js package and as a standalone executable. This
+page covers installing it and running the first import.
 
 ## Requirements
 
-- Node.js 24+
 - macOS or Linux; Windows users can run Agentmine in WSL
 - `rsync` for transcript sync and `tar` for backup/history imports
-- pnpm, when building from source
-- SQLite via Node's built-in `node:sqlite` (no native build / prebuilt binary)
+- Node.js 24+ for the npm package, or no external runtime for a standalone executable
+- pnpm and Bun 1.3.14 only when building both distributions from source
+- SQLite through the selected runtime's built-in driver; no third-party native SQLite package
 
 Optional:
 
@@ -26,6 +26,12 @@ Install the published package globally:
 npm i -g agentmine
 ```
 
+Alternatively, download the matching `linux-x64`, `darwin-x64`, or `darwin-arm64` archive from
+[GitHub Releases](https://github.com/baranovxyz/agentmine/releases). The standalone executable
+does not require Node.js or a separate Bun installation. The
+[README installation steps](https://github.com/baranovxyz/agentmine#install) show how to select
+the latest asset and verify its immutable release attestation with GitHub CLI.
+
 Or build from source:
 
 ```bash
@@ -33,6 +39,16 @@ pnpm install
 pnpm build
 alias agentmine="node $PWD/dist/cli.js"
 ```
+
+Verify either installation:
+
+```bash
+agentmine --version
+agentmine version
+```
+
+The first command prints only the semantic version. The second emits a JSON envelope with the
+runtime, target, runtime version, and public source commit when available.
 
 ## Quick start
 

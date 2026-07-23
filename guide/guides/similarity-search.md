@@ -11,6 +11,7 @@ description: Find prior Agentmine sessions with agentmine similar, in FTS, hybri
 agentmine similar "React Router auth redirect loop" --limit 5
 agentmine similar "schema migration" --source codex
 agentmine similar "test flake timeout" --project /path/to/repo
+agentmine similar "today's agentic docs work" --root-only --since 1d
 ```
 
 ## Auto mode
@@ -20,6 +21,30 @@ By default, `similar` runs in `auto` mode:
 - It uses FTS when no local embedding index is available.
 - It can use hybrid search when local embeddings exist and guardrails are satisfied.
 - It returns reconstruction commands such as `agentmine session <id> --md`.
+- It excludes runtime-injected instructions, skill payloads, hook feedback, compaction handoffs,
+  and automatic approval transcripts from matching content.
+
+Pass `--include-injected` only for corpus diagnostics. It restores those messages to both lexical
+and semantic candidate searches and preserves raw injected session titles; otherwise those titles
+are returned as `null`.
+
+## Time and lineage filters
+
+Use `--root-only` to exclude normalized child workers and automatic reviewers. Combine it with
+`--since` and `--until` for a bounded investigation:
+
+```bash
+agentmine similar "agent-context-kit agentic docs" \
+  --all-projects \
+  --root-only \
+  --since "2026-07-23T00:00:00+03:00" \
+  --until "2026-07-24T00:00:00+03:00"
+```
+
+`--since` is inclusive and `--until` is exclusive for ISO timestamps. A bare `YYYY-MM-DD`
+`--until` includes that complete UTC day, matching the shared Agentmine date-filter contract.
+Impossible calendar dates are rejected instead of rolling into a later month. When the user's day
+is not UTC, pass explicit ISO offsets as shown above.
 
 ## Optional local embeddings
 

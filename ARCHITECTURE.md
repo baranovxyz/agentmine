@@ -146,10 +146,13 @@ Throttled to 10 Hz to avoid log spam. Events go to stderr; stdout stays data-onl
 ## Database lifecycle
 
 - `openDb({ readonly?, init?, path? })` — returns a [src/db/sqlite.ts](src/db/sqlite.ts) handle, a
-  thin compatibility shim over Node's built-in `node:sqlite` (`DatabaseSync`). It reproduces the
-  small better-sqlite3-style API the codebase uses (`prepare<P, R>` / `pragma` / `transaction` /
-  `execBatch` / `backup`), so there is no native dependency. In non-readonly mode it applies the
-  bundled schema (idempotent `CREATE TABLE IF NOT EXISTS`) and writes `meta.schema_version`.
+  compatibility shim over Node's built-in `node:sqlite` (`DatabaseSync`) in the npm distribution
+  and Bun's built-in `bun:sqlite` (`Database`) in standalone executables. It reproduces the small
+  better-sqlite3-style API the codebase uses (`prepare<P, R>` / `pragma` / `transaction` /
+  `execBatch` / `backup`), so there is no third-party native dependency. Node uses its online
+  backup API; Bun uses `VACUUM INTO` so WAL-mode backups remain self-contained. In non-readonly
+  mode the wrapper applies the bundled schema (idempotent `CREATE TABLE IF NOT EXISTS`) and writes
+  `meta.schema_version`.
 - Schema changes: edit [src/db/schema.sql](src/db/schema.sql) AND paste into
   [src/db/schemaText.ts](src/db/schemaText.ts) (the bundled binary doesn't ship the `.sql` file).
   Bump `SCHEMA_VERSION` in [src/db/client.ts](src/db/client.ts) if the change is breaking.
@@ -287,8 +290,8 @@ adapters by source.
 Copilot CLI (file-per-session), but **deliberately does not snapshot the OpenCode, Kilo Code, or
 Goose SQLite stores**. The `opencode-db`, `kilo`, and `goose` sources open their default
 databases directly in read-only mode
-via the `node:sqlite` shim (`readonly: true, fileMustExist: true`) and pass the handles to their
-`agent-canonical` parsers. The reasons:
+via the runtime-native SQLite shim (`readonly: true, fileMustExist: true`) and pass the handles to
+their `agent-canonical` parsers. The reasons:
 
 - These databases can be large and use WAL mode; copying them on every sync would dominate runtime
   for almost no benefit on most days.
@@ -384,9 +387,9 @@ PII, fast).
   dev runs, or the compiled `dist/cli.js` for production use. Direct `node src/cli.ts` will fail.
 - **FTS5 hyphen handling** — FTS5 parses `agent-first` as `agent MINUS first`. Wrap in double
   quotes: `agentmine fts '"agent-first"'`.
-- **No native dependencies** — storage is Node's built-in `node:sqlite` (requires Node >= 24), so
-  there is nothing to compile for the DB driver. Only esbuild (via tsup) needs dependency-build
-  approval, declared in the standalone repository's root pnpm configuration.
+- **No third-party native DB dependency** — the npm package uses Node's built-in `node:sqlite`
+  (requires Node >= 24), while standalone executables use Bun's built-in `bun:sqlite`. Bun and
+  esbuild are the only approved dependency install scripts in the standalone repository policy.
 - **`node:sqlite` under Vitest needs Vitest ≥ 3 (Vite ≥ 7)** — Vitest 2.x's vite-node runner strips
   the `node:` prefix and then can't resolve bare `sqlite` (it is in `module.builtinModules` only as
   `node:sqlite`, and Vite 5 builds its builtin set from non-prefixed names), so every suite that

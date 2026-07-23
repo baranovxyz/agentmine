@@ -3,6 +3,7 @@ import { defineCommand } from "citty";
 import { Errors } from "../contract/errors.js";
 import { reportProgressImmediate } from "../contract/progress.js";
 import { runCommand } from "../contract/result.js";
+import { resolveSelfInvocation } from "../runtime.js";
 
 export const ingestCommand = defineCommand({
   meta: {
@@ -96,14 +97,12 @@ function runSelf(
   args: string[],
 ): Promise<{ exitCode: number | null; stdout: string; stderr: string }> {
   return new Promise((resolve) => {
-    const child = spawn(
-      process.execPath,
-      [...process.execArgv, process.argv[1]!, ...args],
-      {
-        stdio: ["ignore", "pipe", "pipe"],
-        env: process.env,
-      },
-    );
+    const invocation = resolveSelfInvocation(args);
+    const child = spawn(invocation.command, invocation.args, {
+      stdio: ["ignore", "pipe", "pipe"],
+      env: process.env,
+      shell: false,
+    });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (chunk: Buffer) => {

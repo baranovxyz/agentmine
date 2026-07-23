@@ -44,7 +44,11 @@ export function openDb(opts: OpenDbOptions = {}): DatabaseType {
   }
 
   const db = new Database(path, { readonly });
-  db.pragma("journal_mode = WAL");
+  // Setting WAL can create or update sidecar files. A read-only connection
+  // must inherit the database's existing journal mode instead of requesting a
+  // write; bun:sqlite rejects that write while node:sqlite may appear to allow
+  // it when the database is already in WAL mode.
+  if (!readonly) db.pragma("journal_mode = WAL");
   // Defensive: whole-command serialization lives in db/lock.ts, but if a writer
   // ever slips through, wait for a contended write rather than failing instantly
   // with SQLITE_BUSY. Transactions here are short (per-batch / per-extractor).

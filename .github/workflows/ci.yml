@@ -91,6 +91,92 @@ jobs:
       - run: pnpm --config.manage-package-manager-versions=false run test:artifact
       - run: pnpm --config.manage-package-manager-versions=false run verify:dist-manifest
 
+  standalone:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: bun-linux-x64-baseline
+          - runner: macos-15-intel
+            target: bun-darwin-x64
+          - runner: macos-15
+            target: bun-darwin-arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: 10.22.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+      - name: Verify selected pnpm major
+        env:
+          EXPECTED_PNPM_MAJOR: "10"
+        run: |
+          ACTUAL_PNPM="$(pnpm --config.manage-package-manager-versions=false --version)"
+          test "${ACTUAL_PNPM%%.*}" = "$EXPECTED_PNPM_MAJOR"
+      - run: pnpm --config.manage-package-manager-versions=false install --frozen-lockfile
+      - name: Build exact standalone executable
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/standalone" "$RUNNER_TEMP/standalone-archives"
+          pnpm --config.manage-package-manager-versions=false build:standalone -- \
+            --target "$TARGET" \
+            --outfile "$RUNNER_TEMP/standalone/agentmine" \
+            --source-commit "$GITHUB_SHA"
+      - name: Run standalone parity smoke suite
+        env:
+          AGENTMINE_STANDALONE_BINARY: ${{ runner.temp }}/standalone/agentmine
+          AGENTMINE_STANDALONE_TARGET: ${{ matrix.target }}
+          AGENTMINE_STANDALONE_SOURCE_COMMIT: ${{ github.sha }}
+        run: pnpm --config.manage-package-manager-versions=false test:standalone
+      - name: Scan exact standalone executable
+        env:
+          TARGET: ${{ matrix.target }}
+          TRUFFLEHOG_INSTALLER_SHA256: c394defeaea8a7c48f828a2051b608a9b19f43f34b891407b66a386c3e2591e2
+        run: |
+          INSTALLER="$RUNNER_TEMP/trufflehog-install.sh"
+          curl -fsSL \
+            https://raw.githubusercontent.com/trufflesecurity/trufflehog/a7bdcf95222c4369422764e168fad84fc912f0dc/scripts/install.sh \
+            -o "$INSTALLER"
+          node -e '
+            const fs = require("node:fs");
+            const { createHash } = require("node:crypto");
+            const actual = createHash("sha256").update(fs.readFileSync(process.argv[1])).digest("hex");
+            if (actual !== process.env.TRUFFLEHOG_INSTALLER_SHA256) {
+              throw new Error("TruffleHog installer checksum mismatch");
+            }
+          ' "$INSTALLER"
+          sh "$INSTALLER" -b "$RUNNER_TEMP/bin" v3.95.9
+          set +e
+          "$RUNNER_TEMP/bin/trufflehog" filesystem \
+            "$RUNNER_TEMP/standalone/agentmine" \
+            --no-verification --no-update --fail --json --log-level=-1 \
+            >"$RUNNER_TEMP/trufflehog-standalone.jsonl" \
+            2>"$RUNNER_TEMP/trufflehog-standalone.stderr"
+          SCAN_STATUS=$?
+          set -e
+          node scripts/verify-binary-secret-scan.mjs \
+            --target "$TARGET" \
+            --exit-code "$SCAN_STATUS" \
+            --findings "$RUNNER_TEMP/trufflehog-standalone.jsonl" \
+            --stderr "$RUNNER_TEMP/trufflehog-standalone.stderr"
+      - name: Package and re-verify standalone archive
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          node scripts/standalone-artifacts.mjs package \
+            --binary "$RUNNER_TEMP/standalone/agentmine" \
+            --target "$TARGET" \
+            --output-dir "$RUNNER_TEMP/standalone-archives" \
+            --version "$VERSION" \
+            --source-commit "$GITHUB_SHA" \
+            --bun-version 1.3.14
+
   secret-scan:
     runs-on: ubuntu-latest
     permissions:
