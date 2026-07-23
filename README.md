@@ -33,11 +33,11 @@ and covered by tests. The README is intentionally concise; the full guide lives 
 
 ## Requirements
 
-- Node.js 24+
 - macOS or Linux; Windows users can run Agentmine in WSL
 - `rsync` for transcript sync and `tar` for backup/history imports
-- pnpm, when building from source
-- SQLite via Node's built-in `node:sqlite` (no native build / prebuilt binary)
+- Node.js 24+ for the npm package, or no external runtime for a standalone executable
+- pnpm and Bun 1.3.14 only when building both distributions from source
+- SQLite through the selected runtime's built-in driver; no third-party native SQLite package
 
 Optional:
 
@@ -51,12 +51,45 @@ Global CLI (requires Node.js 24+):
 npm i -g agentmine
 ```
 
+Or download a standalone executable from
+[GitHub Releases](https://github.com/baranovxyz/agentmine/releases). Choose one platform:
+`linux-x64`, `darwin-x64`, or `darwin-arm64`. Each archive contains one executable named
+`agentmine`; it does not require Node.js or a separate Bun installation.
+
+With GitHub CLI installed, the following downloads the latest macOS arm64 asset and verifies its
+immutable release attestation. Change `PLATFORM` for another target:
+
+```bash
+REPOSITORY=baranovxyz/agentmine
+PLATFORM=darwin-arm64
+TAG=$(gh release view --repo "$REPOSITORY" --json tagName --jq .tagName)
+VERSION=${TAG#v}
+ARCHIVE="agentmine-v${VERSION}-${PLATFORM}.tar.gz"
+gh release download "$TAG" --repo "$REPOSITORY" --pattern "$ARCHIVE"
+gh release verify "$TAG" --repo "$REPOSITORY"
+gh release verify-asset "$TAG" "$ARCHIVE" --repo "$REPOSITORY"
+tar -xzf "$ARCHIVE"
+mkdir -p "$HOME/.local/bin"
+install -m 0755 agentmine "$HOME/.local/bin/agentmine"
+"$HOME/.local/bin/agentmine" version
+```
+
+The final command reports `bun-standalone`, the platform target, Bun version, and public source
+commit in Agentmine's JSON envelope. The macOS executables are not claimed to be Apple-notarized or
+platform-signed.
+
 Or from source:
 
 ```bash
 pnpm install
 pnpm build
 alias agentmine="node $PWD/dist/cli.js"
+
+# Standalone executable for this Mac (choose the matching explicit target)
+pnpm build:standalone -- \
+  --target bun-darwin-arm64 \
+  --outfile ./agentmine \
+  --source-commit "$(git rev-parse HEAD)"
 ```
 
 ## Quick Start

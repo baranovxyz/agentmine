@@ -97,6 +97,14 @@ export const schemaCommand = defineCommand({
             "5": "Conflict (no-op / already exists)",
           },
           commands: {
+            version: {
+              description: "Report Agentmine and runtime build metadata",
+              annotations: {
+                readOnlyHint: true,
+                destructiveHint: false,
+                idempotentHint: true,
+              },
+            },
             schema: {
               description:
                 "Emit agent discovery metadata and the result-envelope JSON Schema",

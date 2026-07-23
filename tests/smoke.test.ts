@@ -23,6 +23,7 @@ import {
 } from "../src/db/client.js";
 import { upsertSession } from "../src/db/writer.js";
 import { runAllExtractors } from "../src/extract/index.js";
+import { VERSION } from "../src/version.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -63,6 +64,31 @@ describe("cli envelope", () => {
     expect(parsed.data.outputVersion).toBe(1);
     expect(parsed.data.exitCodes["0"]).toBe("Success");
     expect(parsed.data.commands.schema).toBeTruthy();
+  });
+
+  it("reports Node runtime metadata without changing --version output", async () => {
+    const [{ exitCode, stdout }, plain] = await Promise.all([
+      runCli(["version"]),
+      runCli(["--version"]),
+    ]);
+    expect(exitCode).toBe(0);
+    expect(plain.exitCode).toBe(0);
+    expect(plain.stdout.trim()).toBe(VERSION);
+
+    const parsed = JSON.parse(stdout.trim());
+    expect(parsed).toMatchObject({
+      version: 1,
+      status: "success",
+      command: "agentmine version",
+      data: {
+        agentmine_version: VERSION,
+        runtime: "node",
+        runtime_version: process.versions.node,
+        target: null,
+        bun_version: null,
+        source_commit: null,
+      },
+    });
   });
 
   it("stderr stays clean on success (no stdout pollution)", async () => {
@@ -376,6 +402,7 @@ describe("cli envelope", () => {
     expect(parsed.data.commands.backup).toBeTruthy();
     expect(parsed.data.commands.backup.annotations.destructiveHint).toBe(false);
     expect(parsed.data.commands.backup.annotations.idempotentHint).toBe(false);
+    expect(parsed.data.commands.version.annotations.readOnlyHint).toBe(true);
     expect(parsed.data.commands.similar).toBeTruthy();
     expect(parsed.data.commands.similar.annotations.readOnlyHint).toBe(true);
     expect(parsed.data.commands.sessions).toBeTruthy();
@@ -860,6 +887,198 @@ describe("cli envelope", () => {
       expect(
         parsed.data.rows.map((row: { session_id: string }) => row.session_id),
       ).toEqual(["cur--prior-session"]);
+    },
+    CLI_TEST_TIMEOUT,
+  );
+
+  it(
+    "bounds similar to authored root sessions in a time window",
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), "agentmine-similar-bounded-"));
+      const dbPath = join(dir, "test.db");
+      const db = openDb({ path: dbPath });
+      const currentDay = Math.floor(Date.parse("2026-07-23T10:00:00Z") / 1000);
+      const priorDay = Math.floor(Date.parse("2026-07-22T10:00:00Z") / 1000);
+      try {
+        upsertSession(db, {
+          id: "cx--agentic-docs-root",
+          source: "codex",
+          projectPath: "/repo/agent-context-kit",
+          title: "# AGENTS.md instructions\n\n<INSTRUCTIONS>",
+          startedAt: currentDay,
+          messages: [
+            {
+              turn: 1,
+              role: "user",
+              text: "Move agent-context-kit agentic docs into plugin packages.",
+              toolCalls: [],
+            },
+          ],
+          contentHash: randomUUID(),
+        });
+        upsertSession(db, {
+          id: "cx--agentic-docs-reviewer",
+          source: "codex",
+          parentSessionId: "cx--agentic-docs-root",
+          agentType: "guardian",
+          projectPath: "/repo/agent-context-kit",
+          title: "Automatic action review",
+          startedAt: currentDay + 1,
+          messages: [
+            {
+              turn: 1,
+              role: "user",
+              text: "The following is the Codex agent history whose request action you are assessing.\nagent-context-kit agentic docs",
+              toolCalls: [],
+            },
+          ],
+          contentHash: randomUUID(),
+        });
+        upsertSession(db, {
+          id: "cx--agentic-docs-injected-only",
+          source: "codex",
+          projectPath: "/repo/other",
+          title: "Runtime instructions",
+          startedAt: currentDay + 2,
+          messages: [
+            {
+              turn: 1,
+              role: "user",
+              text: "# AGENTS.md instructions\n\n<INSTRUCTIONS>\nagent-context-kit agentic docs",
+              toolCalls: [],
+            },
+          ],
+          contentHash: randomUUID(),
+        });
+        upsertSession(db, {
+          id: "cx--agentic-docs-environment-only",
+          source: "codex",
+          projectPath: "/repo/other",
+          title: "<environment_context>\n  <cwd>/repo/other</cwd>",
+          startedAt: currentDay + 3,
+          messages: [
+            {
+              turn: 1,
+              role: "user",
+              text: "<environment_context>\n  <cwd>/repo/agent-context-kit-agentic-docs</cwd>\n</environment_context>",
+              toolCalls: [],
+            },
+          ],
+          contentHash: randomUUID(),
+        });
+        upsertSession(db, {
+          id: "cx--agentic-docs-plugin-envelope",
+          source: "codex",
+          projectPath: "/repo/other",
+          title: "<recommended_plugins>\n  <plugin>example</plugin>",
+          startedAt: currentDay + 4,
+          messages: [
+            {
+              turn: 1,
+              role: "user",
+              text: "<recommended_plugins>\n  <plugin>example</plugin>\n</recommended_plugins>\n\n<environment_context>\n  <cwd>/repo/agent-context-kit-agentic-docs</cwd>\n</environment_context>",
+              toolCalls: [],
+            },
+          ],
+          contentHash: randomUUID(),
+        });
+        upsertSession(db, {
+          id: "cx--agentic-docs-old",
+          source: "codex",
+          projectPath: "/repo/agent-context-kit",
+          title: "Old agentic docs work",
+          startedAt: priorDay,
+          messages: [
+            {
+              turn: 1,
+              role: "user",
+              text: "Move agent-context-kit agentic docs into plugin packages.",
+              toolCalls: [],
+            },
+          ],
+          contentHash: randomUUID(),
+        });
+      } finally {
+        db.close();
+      }
+
+      const boundedArgs = [
+        "similar",
+        "agent-context-kit agentic docs",
+        "--all-projects",
+        "--root-only",
+        "--since",
+        "2026-07-23T00:00:00Z",
+        "--until",
+        "2026-07-24T00:00:00Z",
+        "--limit",
+        "10",
+      ];
+      const bounded = await runCli(boundedArgs, { AGENTMINE_DB: dbPath });
+      expect(bounded.exitCode).toBe(0);
+      const boundedJson = JSON.parse(bounded.stdout.trim());
+      expect(
+        boundedJson.data.rows.map(
+          (row: { session_id: string }) => row.session_id,
+        ),
+      ).toEqual(["cx--agentic-docs-root"]);
+      expect(boundedJson.data.root_only).toBe(true);
+      expect(boundedJson.data.injected_messages_excluded).toBe(true);
+      expect(boundedJson.data.since_filter.input).toBe("2026-07-23T00:00:00Z");
+      expect(boundedJson.data.until_filter.input).toBe("2026-07-24T00:00:00Z");
+      expect(boundedJson.data.rows[0].title).toBeNull();
+
+      const withInjected = await runCli(
+        [...boundedArgs, "--include-injected"],
+        { AGENTMINE_DB: dbPath },
+      );
+      rmSync(dir, { recursive: true, force: true });
+
+      expect(withInjected.exitCode).toBe(0);
+      const withInjectedJson = JSON.parse(withInjected.stdout.trim());
+      expect(
+        new Set(
+          withInjectedJson.data.rows.map(
+            (row: { session_id: string }) => row.session_id,
+          ),
+        ),
+      ).toEqual(
+        new Set([
+          "cx--agentic-docs-root",
+          "cx--agentic-docs-injected-only",
+          "cx--agentic-docs-environment-only",
+          "cx--agentic-docs-plugin-envelope",
+        ]),
+      );
+      expect(withInjectedJson.data.injected_messages_excluded).toBe(false);
+    },
+    CLI_TEST_TIMEOUT,
+  );
+
+  it(
+    "rejects impossible calendar dates for similar boundaries",
+    async () => {
+      const dir = mkdtempSync(
+        join(tmpdir(), "agentmine-similar-invalid-date-"),
+      );
+      const dbPath = join(dir, "test.db");
+      const db = openDb({ path: dbPath });
+      db.close();
+      const invalidDate = ["2026", "02", "30"].join("-");
+
+      const result = await runCli(
+        ["similar", "agentic docs", "--all-projects", "--since", invalidDate],
+        { AGENTMINE_DB: dbPath },
+      );
+      rmSync(dir, { recursive: true, force: true });
+
+      expect(result.exitCode).toBe(2);
+      expect(result.stderr).toBe("");
+      const parsed = JSON.parse(result.stdout.trim());
+      expect(parsed.status).toBe("error");
+      expect(parsed.errors[0].name).toBe("INVALID_INPUT");
+      expect(parsed.errors[0].message).toContain("--since");
+      expect(parsed.errors[0].message).toContain(invalidDate);
     },
     CLI_TEST_TIMEOUT,
   );

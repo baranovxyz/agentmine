@@ -77,6 +77,15 @@ describe("_filters parser unit tests", () => {
     expect(parseSince("")).toBeNull();
   });
 
+  it("rejects impossible calendar dates instead of normalizing them", () => {
+    expect(parseSince("2026-02-29")).toBeNull();
+    expect(parseSince("2026-02-30T12:00:00Z")).toBeNull();
+    expect(parseUntil("2026-04-31")).toBeNull();
+    expect(parseSince("2024-02-29")).toBe(
+      Math.floor(Date.parse("2024-02-29T00:00:00Z") / 1000),
+    );
+  });
+
   it("parseUntil resolves bare YYYY-MM-DD to start of next UTC day (exclusive)", () => {
     const may8End = parseUntil("2026-05-08")!;
     expect(may8End).toBe(Math.floor(Date.parse("2026-05-09T00:00:00Z") / 1000));

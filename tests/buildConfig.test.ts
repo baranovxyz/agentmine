@@ -34,6 +34,7 @@ function escapeRegexLiteral(value: string): string {
 const PackageJsonSchema = z.object({
   scripts: z.object({
     build: z.string(),
+    "build:standalone": z.string(),
     "verify:dist-manifest": z.string(),
   }),
   devDependencies: z.record(z.string(), z.string()).optional(),
@@ -49,6 +50,9 @@ describe("build config", () => {
     const pkg = PackageJsonSchema.parse(packageJson);
 
     expect(pkg.scripts.build).toContain("tsup");
+    expect(pkg.scripts["build:standalone"]).toBe(
+      "bun scripts/build-standalone.mjs",
+    );
     expect(pkg.scripts["verify:dist-manifest"]).toBe(
       "node scripts/verify-dist-manifest.mjs",
     );
@@ -58,10 +62,26 @@ describe("build config", () => {
     // dependency graph is deterministic and publication-safe. Assert the pin
     // shape, not the number, so version bumps don't churn this test.
     expect(pkg.devDependencies ?? {}).toHaveProperty("agent-canonical");
-    expect((pkg.devDependencies ?? {})["agent-canonical"]).toMatch(
+    expect(pkg.devDependencies?.["agent-canonical"]).toMatch(
       /^\d+\.\d+\.\d+$/u,
     );
+    expect(pkg.devDependencies?.bun).toBe("1.3.14");
     expect(existsSync(join(REPO, "tsup.config.ts"))).toBe(true);
+
+    const standaloneBuild = readFileSync(
+      join(REPO, "scripts", "build-standalone.mjs"),
+      "utf8",
+    );
+    for (const target of [
+      "bun-linux-x64-baseline",
+      "bun-darwin-x64",
+      "bun-darwin-arm64",
+    ]) {
+      expect(standaloneBuild).toContain(`"${target}"`);
+    }
+    expect(standaloneBuild).toContain("autoloadDotenv: false");
+    expect(standaloneBuild).toContain("autoloadBunfig: false");
+    expect(standaloneBuild).toContain("--source-commit");
   });
 
   it("pins public CI actions and the TruffleHog installer", () => {
@@ -90,7 +110,7 @@ describe("build config", () => {
       'npm_config_manage_package_manager_versions: "false"',
     );
     expect(workflow.match(/- name: Verify selected pnpm major/gu)).toHaveLength(
-      2,
+      3,
     );
     expect(
       workflow.match(
@@ -107,7 +127,7 @@ describe("build config", () => {
     );
     expect(
       workflow.match(/pnpm --config\.manage-package-manager-versions=false/gu),
-    ).toHaveLength(5);
+    ).toHaveLength(9);
     expect(workflow).not.toMatch(
       /- run: pnpm (?:install|build|test(?::artifact)?|verify:dist-manifest)\b/gu,
     );
@@ -130,8 +150,13 @@ describe("build config", () => {
     expect(workflow).toContain(
       "Built dist contains a secret-like value or the scanner failed",
     );
+    expect(workflow).toContain("node scripts/verify-binary-secret-scan.mjs");
+    expect(
+      workflow.match(/^\s+TARGET: \$\{\{ matrix\.target \}\}$/gmu),
+    ).toHaveLength(3);
     expect(workflow).not.toMatch(/cat[^\n]*trufflehog-dist/u);
     expect(workflow).not.toContain("--only-verified");
+    expect(workflow).not.toContain("--exclude-detectors");
   });
 
   it("limits the LiteLLM model-label Gitleaks exception to one rule and path", () => {
@@ -193,6 +218,12 @@ describe("build config", () => {
     );
     const prepareJob = workflow
       .split("\n  prepare:\n")[1]
+      ?.split("\n  standalone:\n")[0];
+    const standaloneJob = workflow
+      .split("\n  standalone:\n")[1]
+      ?.split("\n  standalone_manifest:\n")[0];
+    const manifestJob = workflow
+      .split("\n  standalone_manifest:\n")[1]
       ?.split("\n  publish:\n")[0];
     const publishJob = workflow
       .split("\n  publish:\n")[1]
@@ -203,6 +234,8 @@ describe("build config", () => {
     const releaseJob = workflow.split("\n  tag-and-release:\n")[1];
     if (
       prepareJob === undefined ||
+      standaloneJob === undefined ||
+      manifestJob === undefined ||
       publishJob === undefined ||
       verifyJob === undefined ||
       releaseJob === undefined
@@ -252,7 +285,50 @@ describe("build config", () => {
     expect(prepareJob).not.toMatch(/curl[^\n]*\|\s*sh/u);
     expect(prepareJob).toContain("actions/upload-artifact@");
 
+    expect(standaloneJob).toContain("needs: prepare");
+    expect(standaloneJob).not.toContain("id-token: write");
+    expect(standaloneJob).toContain("bun-linux-x64-baseline");
+    expect(standaloneJob).toContain("bun-darwin-x64");
+    expect(standaloneJob).toContain("bun-darwin-arm64");
+    expect(standaloneJob).toContain("ubuntu-24.04");
+    expect(standaloneJob).toContain("macos-15-intel");
+    expect(standaloneJob).toContain("macos-15");
+    expect(standaloneJob).toContain("pnpm install --frozen-lockfile");
+    expect(standaloneJob).toContain("pnpm build:standalone");
+    expect(standaloneJob).toContain("pnpm test:standalone");
+    expect(standaloneJob).toContain("Scan exact standalone executable");
+    expect(standaloneJob).toContain(
+      "--no-verification --no-update --fail --json --log-level=-1",
+    );
+    expect(standaloneJob).toContain(
+      "node scripts/verify-binary-secret-scan.mjs",
+    );
+    expect(
+      standaloneJob.match(/^\s+TARGET: \$\{\{ matrix\.target \}\}$/gmu),
+    ).toHaveLength(3);
+    expect(standaloneJob).not.toMatch(/cat[^\n]*trufflehog-standalone/u);
+    expect(standaloneJob).not.toContain("--exclude-detectors");
+    expect(standaloneJob).toContain(
+      "node scripts/standalone-artifacts.mjs package",
+    );
+    expect(standaloneJob).toContain("actions/upload-artifact@");
+
+    expect(manifestJob).toContain("needs: [prepare, standalone]");
+    expect(manifestJob).not.toContain("id-token: write");
+    expect(manifestJob).toContain("pattern: agentmine-standalone-*");
+    expect(manifestJob).toContain("merge-multiple: true");
+    expect(manifestJob).toContain(
+      "node scripts/standalone-artifacts.mjs manifest",
+    );
+    expect(manifestJob).toContain(
+      "node scripts/standalone-artifacts.mjs verify",
+    );
+    expect(manifestJob).toContain("agentmine-release-manifest.json");
+    expect(manifestJob).toContain("SHA256SUMS");
+    expect(manifestJob).toContain("name: agentmine-standalone-release");
+
     expect(publishJob).toContain("id-token: write");
+    expect(publishJob).toContain("needs: [prepare, standalone_manifest]");
     expect(publishJob).toContain("environment: npm");
     expect(publishJob).toContain("actions: read");
     expect(publishJob).not.toContain("contents: read");
@@ -292,8 +368,26 @@ describe("build config", () => {
     expect(workflow).toContain(
       "Tag $TAG already points at $REMOTE_SHA, expected $GITHUB_SHA",
     );
-    expect(workflow).toContain('git tag "$TAG" "$GITHUB_SHA"');
+    expect(workflow).not.toContain('git tag "$TAG" "$GITHUB_SHA"');
     expect(releaseJob).toContain("needs.verify.result == 'success'");
+    expect(releaseJob).toContain(
+      "needs: [prepare, verify, standalone_manifest]",
+    );
+    expect(releaseJob).toContain("Re-verify prepared standalone release set");
+    expect(releaseJob).toContain("gh release create");
+    expect(releaseJob).toContain("--draft");
+    expect(releaseJob).toContain('gh release edit "$TAG" --draft=false');
+    expect(releaseJob).toContain('gh release verify "$TAG"');
+    expect(releaseJob).toContain('gh release verify-asset "$TAG" "$ASSET"');
+    expect(releaseJob).toContain(
+      "draft release asset set is incomplete or unexpected",
+    );
+    expect(releaseJob).toContain(
+      "immutable release asset set is incomplete or unexpected",
+    );
+    expect(
+      releaseJob.indexOf("draft release asset set is incomplete or unexpected"),
+    ).toBeLessThan(releaseJob.indexOf('gh release edit "$TAG" --draft=false'));
     expect(workflow.indexOf("- name: Tag preflight")).toBeLessThan(
       workflow.indexOf("- name: Publish (dry run)"),
     );

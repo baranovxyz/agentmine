@@ -3,6 +3,18 @@
 Notable Agentmine changes only. Keep this file short; detailed implementation notes belong in
 commit history and release notes.
 
+## 0.7.0 - 2026-07-23
+
+- Distribution: publish Linux x64, macOS x64, and macOS arm64 standalone executables alongside
+  the existing npm package under one Agentmine version.
+- Runtime parity: compiled executables support the full CLI, including SQLite ingest and backup,
+  self-executing `ingest`, user extensions, embeddings, and online or offline model prices.
+- Release integrity: all three native builds must pass smoke and secret scans before npm
+  publication; immutable GitHub release assets are bound by a canonical manifest and SHA-256
+  checksums.
+- Discovery: add `agentmine version` for machine-readable runtime, target, Bun version, and source
+  commit metadata while preserving plain semantic-version output from `agentmine --version`.
+
 ## 0.6.0 - 2026-07-22
 
 - Discovery: the package description, docs, and keywords now lead with the job — long-term memory

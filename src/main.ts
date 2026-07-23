@@ -16,6 +16,7 @@ import { statsCommand } from "./commands/stats.js";
 import { syncCommand } from "./commands/sync.js";
 import { timelineCommand } from "./commands/timeline.js";
 import { topCommand } from "./commands/top.js";
+import { versionCommand } from "./commands/version.js";
 import { workflowCommand } from "./commands/workflow.js";
 import { workflowsCommand } from "./commands/workflows.js";
 import { VERSION } from "./version.js";
@@ -28,6 +29,7 @@ const main = defineCommand({
       "Long-term memory for your AI coding agents. One local SQLite corpus of your Claude Code / Cursor / Codex / Copilot / OpenCode sessions — resume prior work, recall how you solved something before, and reconstruct what past sessions did. Agent-first JSON CLI.",
   },
   subCommands: {
+    version: versionCommand,
     schema: schemaCommand,
     backup: backupCommand,
     sync: syncCommand,

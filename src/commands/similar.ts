@@ -7,6 +7,8 @@ import type { DatabaseType } from "../db/client.js";
 import { dbExists, openDb } from "../db/client.js";
 import { deserializeVector } from "../embeddings/chunks.js";
 import { createEmbeddingProvider } from "../embeddings/providers.js";
+import { INJECTED_TEXT_PREFIXES, isInjectedNoise } from "../noise.js";
+import { parseSince, parseUntil } from "./_filters.js";
 
 export interface SimilarRow {
   session_id: string;
@@ -84,6 +86,13 @@ interface ModeSelection {
   fallback_reasons?: AutoFallbackReason[];
 }
 
+interface SimilarFilters {
+  since?: { input: string; epoch: number };
+  until?: { input: string; epoch: number };
+  rootOnly: boolean;
+  includeInjected: boolean;
+}
+
 export const similarCommand = defineCommand({
   meta: {
     name: "similar",
@@ -105,6 +114,27 @@ export const similarCommand = defineCommand({
       description: "Restrict to a source (claude-code|cursor|...)",
     },
     project: { type: "string", description: "Restrict to project_path prefix" },
+    since: {
+      type: "string",
+      description:
+        "Only sessions on/after this point (ISO date, YYYY-MM-DD, or relative offset like 7d)",
+    },
+    until: {
+      type: "string",
+      description:
+        "Only sessions before this point (a bare YYYY-MM-DD includes that whole UTC day)",
+    },
+    "root-only": {
+      type: "boolean",
+      default: false,
+      description: "Exclude child workers and automatic reviewer sessions",
+    },
+    "include-injected": {
+      type: "boolean",
+      default: false,
+      description:
+        "Include runtime-injected instruction, skill, hook, and approval-review messages",
+    },
     role: {
       type: "string",
       description: "Restrict matching turns to one role",
@@ -159,6 +189,7 @@ export const similarCommand = defineCommand({
 
         const limit = parseLimit(args.limit, 10);
         const requestedMode = parseMode(args.mode);
+        const filters = parseSimilarFilters(args);
         const db = openDb({ readonly: true });
         try {
           const explicitProject = args.project
@@ -190,6 +221,7 @@ export const similarCommand = defineCommand({
             source: args.source ? String(args.source) : undefined,
             project,
             excludedSessions,
+            filters,
           });
           const mode = modeSelection.selected;
           const ftsRows =
@@ -202,6 +234,7 @@ export const similarCommand = defineCommand({
                   project,
                   role: args.role ? String(args.role) : undefined,
                   excludeSessions: excludedSessions,
+                  filters,
                 });
 
           if (mode === "fts") {
@@ -221,6 +254,7 @@ export const similarCommand = defineCommand({
                   : inferredProject
                     ? "cwd"
                     : null,
+                ...searchFilterFields(filters),
                 excluded_sessions: excludedSessions,
                 ...warningFields(warnings),
                 ...confidenceFields(finalized.lowConfidence),
@@ -239,6 +273,7 @@ export const similarCommand = defineCommand({
               source: args.source ? String(args.source) : undefined,
               project,
               excludeSessions: excludedSessions,
+              filters,
             });
           } catch (e) {
             if (requestedMode !== "auto") throw e;
@@ -262,6 +297,7 @@ export const similarCommand = defineCommand({
                   : inferredProject
                     ? "cwd"
                     : null,
+                ...searchFilterFields(filters),
                 excluded_sessions: excludedSessions,
                 ...warningFields(warnings),
                 ...confidenceFields(finalized.lowConfidence),
@@ -295,6 +331,7 @@ export const similarCommand = defineCommand({
                 : inferredProject
                   ? "cwd"
                   : null,
+              ...searchFilterFields(filters),
               excluded_sessions: excludedSessions,
               ...semanticExclusionFields(mode, excludedSessions),
               ...warningFields(warnings),
@@ -324,6 +361,7 @@ function findFtsRows(
     project?: string;
     role?: string;
     excludeSessions?: string[];
+    filters: SimilarFilters;
   },
 ): MatchRow[] {
   const clauses = ["messages_fts MATCH ?"];
@@ -340,6 +378,10 @@ function findFtsRows(
     clauses.push("m.role = ?");
     params.push(opts.role);
   }
+  addSessionFilterClauses(clauses, params, "s", opts.filters);
+  if (!opts.filters.includeInjected) {
+    addInjectedTextExclusion(clauses, params, "m.text");
+  }
   addExcludedSessionClause(
     clauses,
     params,
@@ -348,7 +390,7 @@ function findFtsRows(
   );
   params.push(opts.limit);
 
-  return db
+  const rows = db
     .prepare(
       `SELECT f.session_id, f.turn, m.role,
               s.source, s.project_path, s.git_branch, s.title,
@@ -363,6 +405,10 @@ function findFtsRows(
         LIMIT ?`,
     )
     .all(...params) as MatchRow[];
+  return rows.map((row) => ({
+    ...row,
+    title: visibleTitle(row.title, opts.filters.includeInjected),
+  }));
 }
 
 function groupMatches(rows: MatchRow[]): SimilarRow[] {
@@ -410,6 +456,7 @@ async function findEmbeddingRows(
     source?: string;
     project?: string;
     excludeSessions?: string[];
+    filters: SimilarFilters;
   },
 ): Promise<SimilarRow[]> {
   const provider = createEmbeddingProvider(opts.providerName, opts.model);
@@ -439,6 +486,10 @@ async function findEmbeddingRows(
     clauses.push(projectPathClause("s.project_path"));
     params.push(...projectPathParams(opts.project));
   }
+  addSessionFilterClauses(clauses, params, "s", opts.filters);
+  if (!opts.filters.includeInjected) {
+    addInjectedChunkExclusion(clauses, params, "c");
+  }
   addExcludedSessionClause(
     clauses,
     params,
@@ -463,6 +514,7 @@ async function findEmbeddingRows(
   const toolQuery = isToolQuery(opts.query);
   const bySession = new Map<string, SimilarRow>();
   for (const row of rows) {
+    const title = visibleTitle(row.title, opts.filters.includeInjected);
     let score = cosine(
       queryEmbedding.vector,
       deserializeVector(row.vector),
@@ -472,13 +524,13 @@ async function findEmbeddingRows(
       score *= 0.65;
     }
     const snippet = row.text_preview ?? row.retrieval_text.slice(0, 240);
-    score *= contentQualityMultiplier(row.title, snippet);
+    score *= contentQualityMultiplier(title, snippet);
     const candidate = {
       session_id: row.session_id,
       source: row.source,
       project_path: row.project_path,
       git_branch: row.git_branch,
-      title: row.title,
+      title,
       started_at: row.started_at,
       turn_count: row.turn_count,
       tool_call_count: row.tool_call_count,
@@ -654,6 +706,7 @@ function selectMode(
     source?: string;
     project?: string;
     excludedSessions: string[];
+    filters: SimilarFilters;
   },
 ): ModeSelection {
   const guardrails: ModeSelection["guardrails"] = {
@@ -739,6 +792,7 @@ function hasUsableEmbeddingIndex(
     source?: string;
     project?: string;
     excludedSessions: string[];
+    filters: SimilarFilters;
   },
 ): boolean {
   const provider = createEmbeddingProvider(opts.providerName, opts.model);
@@ -756,6 +810,10 @@ function hasUsableEmbeddingIndex(
   if (opts.project) {
     clauses.push(projectPathClause("s.project_path"));
     params.push(...projectPathParams(opts.project));
+  }
+  addSessionFilterClauses(clauses, params, "s", opts.filters);
+  if (!opts.filters.includeInjected) {
+    addInjectedChunkExclusion(clauses, params, "c");
   }
   addExcludedSessionClause(
     clauses,
@@ -804,6 +862,27 @@ function warningFields(warnings: string[]): { warnings?: string[] } {
 
 function confidenceFields(lowConfidence: boolean): { low_confidence?: true } {
   return lowConfidence ? { low_confidence: true } : {};
+}
+
+function searchFilterFields(filters: SimilarFilters): {
+  since_filter: SimilarFilters["since"] | null;
+  until_filter: SimilarFilters["until"] | null;
+  root_only: boolean;
+  injected_messages_excluded: boolean;
+} {
+  return {
+    since_filter: filters.since ?? null,
+    until_filter: filters.until ?? null,
+    root_only: filters.rootOnly,
+    injected_messages_excluded: !filters.includeInjected,
+  };
+}
+
+function visibleTitle(
+  title: string | null,
+  includeInjected: boolean,
+): string | null {
+  return !includeInjected && isInjectedNoise(title) ? null : title;
 }
 
 function hybridScore(ranks: {
@@ -881,6 +960,42 @@ function parseMode(v: unknown): RequestedMode {
   throw Errors.invalidInput(
     `--mode must be one of auto|fts|embedding|hybrid (got '${mode}')`,
   );
+}
+
+function parseSimilarFilters(args: Record<string, unknown>): SimilarFilters {
+  const since = parseTimeFilter(args.since, "--since", parseSince);
+  const until = parseTimeFilter(args.until, "--until", parseUntil);
+  if (
+    since !== undefined &&
+    until !== undefined &&
+    since.epoch >= until.epoch
+  ) {
+    throw Errors.invalidInput(
+      `--since must resolve before --until (got '${since.input}' and '${until.input}')`,
+    );
+  }
+  return {
+    since,
+    until,
+    rootOnly: Boolean(args["root-only"]),
+    includeInjected: Boolean(args["include-injected"]),
+  };
+}
+
+function parseTimeFilter(
+  value: unknown,
+  flag: "--since" | "--until",
+  parse: (input: string) => number | null,
+): { input: string; epoch: number } | undefined {
+  if (value === undefined || value === null || value === "") return undefined;
+  const input = String(value);
+  const epoch = parse(input);
+  if (epoch === null) {
+    throw Errors.invalidInput(
+      `${flag} must be ISO date, YYYY-MM-DD, or relative offset like 7d/2w/12h (got '${input}')`,
+    );
+  }
+  return { input, epoch };
 }
 
 function inferCurrentProjectFilter(
@@ -974,6 +1089,64 @@ function addExcludedSessionClause(
     `${column} NOT IN (${excludeSessions.map(() => "?").join(", ")})`,
   );
   params.push(...excludeSessions);
+}
+
+function addSessionFilterClauses(
+  clauses: string[],
+  params: unknown[],
+  sessionAlias: string,
+  filters: SimilarFilters,
+): void {
+  if (filters.since) {
+    clauses.push(`${sessionAlias}.started_at >= ?`);
+    params.push(filters.since.epoch);
+  }
+  if (filters.until) {
+    clauses.push(`${sessionAlias}.started_at < ?`);
+    params.push(filters.until.epoch);
+  }
+  if (filters.rootOnly) {
+    clauses.push(`${sessionAlias}.parent_session_id IS NULL`);
+  }
+}
+
+function addInjectedTextExclusion(
+  clauses: string[],
+  params: unknown[],
+  column: string,
+): void {
+  addPrefixExclusion(clauses, params, column, INJECTED_TEXT_PREFIXES);
+}
+
+function addInjectedChunkExclusion(
+  clauses: string[],
+  params: unknown[],
+  chunkAlias: string,
+): void {
+  clauses.push(
+    `NOT EXISTS (
+       SELECT 1
+         FROM messages injected_message
+        WHERE injected_message.session_id = ${chunkAlias}.session_id
+          AND injected_message.turn BETWEEN ${chunkAlias}.start_turn AND ${chunkAlias}.end_turn
+          AND (${prefixMatchSql("injected_message.text", INJECTED_TEXT_PREFIXES)})
+     )`,
+  );
+  params.push(...INJECTED_TEXT_PREFIXES.map((prefix) => `${prefix}%`));
+}
+
+function addPrefixExclusion(
+  clauses: string[],
+  params: unknown[],
+  column: string,
+  prefixes: readonly string[],
+): void {
+  clauses.push(`NOT (${prefixMatchSql(column, prefixes)})`);
+  params.push(...prefixes.map((prefix) => `${prefix}%`));
+}
+
+function prefixMatchSql(column: string, prefixes: readonly string[]): string {
+  return prefixes.map(() => `LTRIM(${column}) LIKE ?`).join(" OR ");
 }
 
 function projectPathClause(column: string): string {

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { DatabaseType } from "../db/client.js";
-import { isInjectedNoise } from "./noiseFilter.js";
+import { isInjectedNoise } from "../noise.js";
 
 /**
  * prompt_templates: aggregate distinct first-user-prompts by a normalized

@@ -111,7 +111,7 @@ const syncCommand = defineCommand({
           source: online ? "litellm" : "snapshot",
         });
         const map: RawPriceMap = online
-          ? await fetchLiteLLMPrices()
+          ? await fetchLiteLLMPrices(process.env.AGENTMINE_LITELLM_PRICE_URL)
           : PRICE_SNAPSHOT;
         const db = openDb();
         try {

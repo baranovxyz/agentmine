@@ -28,6 +28,7 @@ agent-friendly JSON envelope — see the
 | `agentmine timeline --bucket week` | Activity timeline |
 | `agentmine workflows --sort tokens` | Rank Claude Code workflow runs by start time, tokens, duration, agents, or name |
 | `agentmine workflow <run-id>` | Inspect one workflow run's rollups, phases, and per-agent rows |
+| `agentmine version` | Report Agentmine, runtime, target, Bun, and source-commit metadata |
 | `agentmine schema` | Inspect the result-envelope schema, exit codes, and top-level command registry |
 | `agentmine schema --tables` | List database tables and views |
 | `agentmine schema --table messages` | Inspect DB columns before writing SQL |
@@ -37,10 +38,11 @@ agent-friendly JSON envelope — see the
 ```bash
 agentmine fts "error text or phrase"
 agentmine similar "task description"
+agentmine similar "today's task" --root-only --since 1d
 ```
 
 See [Similarity search](../guides/similarity-search.md) for `similar`'s `auto`/`hybrid`/`embedding`
-modes.
+modes, time and lineage filters, and injected-message behavior.
 
 **FTS5 hyphen gotcha:** FTS5 parses `agent-first` as `agent MINUS first`. Wrap hyphenated phrases in
 double quotes:

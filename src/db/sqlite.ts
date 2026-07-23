@@ -1,12 +1,14 @@
 /**
- * node:sqlite compatibility shim.
+ * SQLite compatibility shim.
  *
  * Reproduces the slice of the `better-sqlite3` API that Agentmine uses
  * (`prepare<P, R>` / `pragma` / `transaction` / `execBatch` / `backup` / `close`
  * plus `Statement.get/all/run`) on top of Node's built-in `node:sqlite`
- * (`DatabaseSync`). This removes Agentmine's only native dependency, so installs
- * need no node-gyp compile, no prebuilt binary, and no pnpm build approval.
- * Requires Node's `node:sqlite` (Node >= 22.5; package `engines` pins >= 24).
+ * (`DatabaseSync`) or Bun's built-in `bun:sqlite` (`Database`) in a compiled
+ * standalone executable. This removes Agentmine's only native dependency, so
+ * installs need no node-gyp compile or third-party prebuilt SQLite binary.
+ * Requires Node's `node:sqlite` (Node >= 22.5; package `engines` pins >= 24) or
+ * the Bun runtime embedded in the standalone executable.
  *
  * Typing contract: `node:sqlite` returns untyped rows
  * (`Record<string, SQLOutputValue>`). The type assertions confined to THIS file
@@ -18,12 +20,52 @@
  * were under better-sqlite3, with no scattered casts. See AGENTS.md.
  */
 import { existsSync } from "node:fs";
-import {
+import type {
   DatabaseSync,
-  type SQLInputValue,
-  type StatementSync,
-  backup as sqliteBackup,
+  backup as NodeSqliteBackup,
+  SQLInputValue,
+  StatementSync,
 } from "node:sqlite";
+
+declare const AGENTMINE_BUILD_TARGET: string | undefined;
+
+interface RuntimeStatement {
+  get(...params: unknown[]): unknown;
+  all(...params: unknown[]): unknown[];
+  run(...params: unknown[]): RunResult;
+}
+
+interface RuntimeDatabase {
+  prepare(sql: string): RuntimeStatement;
+  close(): void;
+  exec?(sql: string): unknown;
+  run?(sql: string, ...params: unknown[]): unknown;
+}
+
+interface RuntimeDatabaseConstructor {
+  new (
+    path: string,
+    options: {
+      readOnly?: boolean;
+      readonly?: boolean;
+      create?: boolean;
+      strict?: boolean;
+    },
+  ): RuntimeDatabase;
+}
+
+const bunStandalone = typeof AGENTMINE_BUILD_TARGET === "string";
+const sqliteModuleSpecifier = bunStandalone ? "bun:sqlite" : "node:sqlite";
+const sqliteModule = (await import(sqliteModuleSpecifier)) as Record<
+  string,
+  unknown
+>;
+const RuntimeDatabase = (
+  bunStandalone ? sqliteModule.Database : sqliteModule.DatabaseSync
+) as RuntimeDatabaseConstructor;
+const sqliteBackup = (bunStandalone ? undefined : sqliteModule.backup) as
+  | typeof NodeSqliteBackup
+  | undefined;
 
 export interface RunResult {
   changes: number | bigint;
@@ -101,7 +143,7 @@ export class Statement<
   BindParameters extends readonly unknown[] = unknown[],
   Result = unknown,
 > {
-  constructor(private readonly stmt: StatementSync) {}
+  constructor(private readonly stmt: RuntimeStatement) {}
 
   get(...params: BindParameters): Result | undefined {
     const { named, anon } = splitBindArgs(params);
@@ -122,23 +164,31 @@ export class Statement<
 }
 
 export class Database {
-  private readonly handle: DatabaseSync;
+  private readonly handle: RuntimeDatabase;
   private txDepth = 0;
 
   constructor(path: string, options: OpenOptions = {}) {
     if (options.fileMustExist && !existsSync(path)) {
       throw new Error(`unable to open database file: ${path}`);
     }
-    this.handle = new DatabaseSync(path, {
-      readOnly: options.readonly ?? false,
-    });
+    const readonly = options.readonly ?? false;
+    this.handle = bunStandalone
+      ? new RuntimeDatabase(
+          path,
+          readonly
+            ? { readonly: true, strict: true }
+            : { create: true, strict: true },
+        )
+      : new RuntimeDatabase(path, { readOnly: readonly });
   }
 
   prepare<
     BindParameters extends readonly unknown[] = unknown[],
     Result = unknown,
   >(sql: string): Statement<BindParameters, Result> {
-    return new Statement<BindParameters, Result>(this.handle.prepare(sql));
+    return new Statement<BindParameters, Result>(
+      this.handle.prepare(sql) as RuntimeStatement & StatementSync,
+    );
   }
 
   /**
@@ -151,6 +201,7 @@ export class Database {
     if (options.simple) {
       const first = rows[0];
       if (first === undefined) return undefined;
+      if (typeof first !== "object" || first === null) return first;
       return Object.values(first)[0];
     }
     return rows;
@@ -192,7 +243,7 @@ export class Database {
     // Capture the batch method explicitly so it can be called with the
     // DatabaseSync receiver after crossing the compatibility type boundary.
     const handle = this.handle as unknown as { exec: (sql: string) => void };
-    const batch = handle["exec"];
+    const batch = handle.exec;
     batch.call(this.handle, sql);
   }
 
@@ -201,7 +252,22 @@ export class Database {
     options: BackupOptions = {},
   ): Promise<void> {
     const report = options.progress;
-    await sqliteBackup(this.handle, destination, {
+    if (bunStandalone) {
+      const run = this.handle.run;
+      if (!run) {
+        throw new Error("bun:sqlite run() is unavailable");
+      }
+      // serialize() preserves WAL mode in the snapshot header, making the copy
+      // depend on sidecar files that are not part of the backup. VACUUM INTO
+      // creates a self-contained, transactionally consistent SQLite file.
+      run.call(this.handle, "VACUUM INTO ?", destination);
+      report?.({ totalPages: 1, remainingPages: 0 });
+      return;
+    }
+    if (!sqliteBackup) {
+      throw new Error("node:sqlite backup() is unavailable");
+    }
+    await sqliteBackup(this.handle as DatabaseSync, destination, {
       rate: 100,
       progress: report
         ? ({ totalPages, remainingPages }) => {

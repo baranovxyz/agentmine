@@ -1,6 +1,6 @@
 import type { DatabaseType, Statement } from "../db/client.js";
+import { isInjectedNoise } from "../noise.js";
 import { withLlmPreservation } from "./llmPreserve.js";
-import { isInjectedNoise } from "./noiseFilter.js";
 import { type ExtractScope, scopedDelete, scopeWhere } from "./scope.js";
 
 /**
@@ -151,7 +151,7 @@ function populate(
     }
     // Skip turns injected by the agent or runtime rather than authored by the
     // user (skill bodies, context preambles, tool-generated feedback, etc.).
-    // See extract/noiseFilter.ts.
+    // See noise.ts.
     if (isInjectedNoise(msg.text)) continue;
     const classification = classify(msg.text);
     if (!classification) continue;

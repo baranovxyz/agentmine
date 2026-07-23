@@ -524,6 +524,50 @@ describe("similar embedding modes", () => {
         ],
       }),
     );
+    upsertSession(
+      db,
+      makeSession({
+        id: "cc--injected-auth",
+        contentHash: "injected-auth",
+        title: "Runtime instructions",
+        messages: [
+          {
+            turn: 1,
+            role: "user",
+            text: `# AGENTS.md instructions\n\n${"oauth login redirect ".repeat(400)}`,
+            toolCalls: [],
+          },
+        ],
+      }),
+    );
+    upsertSession(
+      db,
+      makeSession({
+        id: "cc--mixed-injected-auth",
+        contentHash: "mixed-injected-auth",
+        title: "Mixed authored and runtime context",
+        messages: [
+          {
+            turn: 1,
+            role: "user",
+            text: "Investigate the oauth login redirect behavior.",
+            toolCalls: [],
+          },
+          {
+            turn: 2,
+            role: "user",
+            text: "# AGENTS.md instructions\n\noauth login redirect runtime payload",
+            toolCalls: [],
+          },
+          {
+            turn: 3,
+            role: "assistant",
+            text: "Preserve the callback return URL.",
+            toolCalls: [],
+          },
+        ],
+      }),
+    );
     db.close();
     const embed = await runCli(
       ["embed", "--provider", "fake", "--model", "fake", "--limit", "20"],
@@ -669,6 +713,110 @@ describe("similar embedding modes", () => {
     expect(parsed.data.rows[0].chunk_id).toBeTruthy();
   });
 
+  it("excludes embedding chunks containing any injected source turn", async () => {
+    const readDb = openDb({ path: dbPath, readonly: true });
+    const mixedChunk = readDb
+      .prepare(
+        `SELECT start_turn, end_turn
+           FROM embedding_chunks
+          WHERE session_id = ?`,
+      )
+      .get("cc--mixed-injected-auth") as
+      | { start_turn: number; end_turn: number }
+      | undefined;
+    readDb.close();
+    expect(mixedChunk).toEqual({ start_turn: 1, end_turn: 3 });
+
+    const baseArgs = [
+      "similar",
+      "oauth login redirect",
+      "--mode",
+      "embedding",
+      "--provider",
+      "fake",
+      "--model",
+      "fake",
+      "--limit",
+      "20",
+    ];
+    const filtered = await runCli(baseArgs, { AGENTMINE_DB: dbPath });
+    expect(filtered.exitCode).toBe(0);
+    const filteredJson = JSON.parse(filtered.stdout.trim());
+    expect(
+      filteredJson.data.rows.map(
+        (row: { session_id: string }) => row.session_id,
+      ),
+    ).not.toContain("cc--injected-auth");
+    expect(
+      filteredJson.data.rows.map(
+        (row: { session_id: string }) => row.session_id,
+      ),
+    ).not.toContain("cc--mixed-injected-auth");
+
+    const included = await runCli([...baseArgs, "--include-injected"], {
+      AGENTMINE_DB: dbPath,
+    });
+    expect(included.exitCode).toBe(0);
+    const includedJson = JSON.parse(included.stdout.trim());
+    expect(
+      includedJson.data.rows.map(
+        (row: { session_id: string }) => row.session_id,
+      ),
+    ).toContain("cc--injected-auth");
+    expect(
+      includedJson.data.rows.map(
+        (row: { session_id: string }) => row.session_id,
+      ),
+    ).toContain("cc--mixed-injected-auth");
+  });
+
+  it("does not treat a mixed injected chunk as a usable auto-mode index", async () => {
+    const writeDb = openDb({ path: dbPath });
+    writeDb
+      .prepare(
+        `DELETE FROM embeddings
+          WHERE chunk_id NOT IN (
+            SELECT id FROM embedding_chunks WHERE session_id = ?
+          )`,
+      )
+      .run("cc--mixed-injected-auth");
+    writeDb.close();
+
+    const args = [
+      "similar",
+      "oauth login redirect",
+      "--project",
+      "/tmp/agentmine-embeddings",
+      "--provider",
+      "fake",
+      "--model",
+      "fake",
+      "--limit",
+      "10",
+    ];
+    const filtered = await runCli(args, {
+      AGENTMINE_DB: dbPath,
+      AGENTMINE_CURRENT_SESSION_ID: "cc--semantic-auth",
+    });
+    expect(filtered.exitCode).toBe(0);
+    const filteredJson = JSON.parse(filtered.stdout.trim());
+    expect(filteredJson.data.mode_selection.selected).toBe("fts");
+    expect(
+      filteredJson.data.mode_selection.guardrails.embedding_index_found,
+    ).toBe(false);
+
+    const included = await runCli([...args, "--include-injected"], {
+      AGENTMINE_DB: dbPath,
+      AGENTMINE_CURRENT_SESSION_ID: "cc--semantic-auth",
+    });
+    expect(included.exitCode).toBe(0);
+    const includedJson = JSON.parse(included.stdout.trim());
+    expect(includedJson.data.mode_selection.selected).toBe("hybrid");
+    expect(
+      includedJson.data.mode_selection.guardrails.embedding_index_found,
+    ).toBe(true);
+  });
+
   it(
     "warns when semantic retrieval has no current-session exclusion context",
     async () => {
@@ -746,6 +894,58 @@ describe("similar embedding modes", () => {
         row.project_path.startsWith("/tmp/agentmine-embeddings"),
       ),
     ).toBe(true);
+  });
+
+  it("applies time and root-session filters to embedding candidates", async () => {
+    const currentDay = Math.floor(Date.parse("2026-07-23T10:00:00Z") / 1000);
+    const priorDay = Math.floor(Date.parse("2026-07-22T10:00:00Z") / 1000);
+    const writeDb = openDb({ path: dbPath });
+    writeDb.prepare(`UPDATE sessions SET started_at = ?`).run(currentDay);
+    writeDb
+      .prepare(`UPDATE sessions SET started_at = ? WHERE id = ?`)
+      .run(priorDay, "custom--semantic-auth");
+    writeDb
+      .prepare(`UPDATE sessions SET parent_session_id = ? WHERE id = ?`)
+      .run("cc--semantic-auth", "cc--tool-only-auth");
+    writeDb.close();
+
+    const { exitCode, stdout } = await runCli(
+      [
+        "similar",
+        "oauth login redirect",
+        "--mode",
+        "embedding",
+        "--provider",
+        "fake",
+        "--model",
+        "fake",
+        "--all-projects",
+        "--root-only",
+        "--since",
+        "2026-07-23T00:00:00Z",
+        "--until",
+        "2026-07-24T00:00:00Z",
+        "--limit",
+        "20",
+      ],
+      { AGENTMINE_DB: dbPath },
+    );
+
+    expect(exitCode).toBe(0);
+    const parsed = JSON.parse(stdout.trim());
+    const ids = parsed.data.rows.map(
+      (row: { session_id: string }) => row.session_id,
+    );
+    expect(ids.length).toBeGreaterThan(0);
+    expect(ids).not.toContain("custom--semantic-auth");
+    expect(ids).not.toContain("cc--tool-only-auth");
+    expect(parsed.data.root_only).toBe(true);
+    expect(parsed.data.since_filter.epoch).toBe(
+      Math.floor(Date.parse("2026-07-23T00:00:00Z") / 1000),
+    );
+    expect(parsed.data.until_filter.epoch).toBe(
+      Math.floor(Date.parse("2026-07-24T00:00:00Z") / 1000),
+    );
   });
 
   it("excludes the current session from hybrid candidates", async () => {

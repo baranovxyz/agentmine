@@ -3,10 +3,12 @@ packages:
 
 # pnpm 9/10 build-script allowlist
 onlyBuiltDependencies:
+  - "bun"
   - "esbuild"
 
 # pnpm 11+ build-script policy
 allowBuilds:
+  "bun": true
   "esbuild": true
 
 # pnpm 11.3+: the standalone lockfile is generated inside the umbrella and
