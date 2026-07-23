@@ -624,7 +624,20 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           TAG="v${{ needs.prepare.outputs.version }}"
-          gh release verify "$TAG"
+          RELEASE_VERIFIED=false
+          for ATTEMPT in 1 2 3 4 5 6; do
+            if gh release verify "$TAG"; then
+              RELEASE_VERIFIED=true
+              break
+            fi
+            if [[ "$ATTEMPT" -lt 6 ]]; then
+              sleep 5
+            fi
+          done
+          if [[ "$RELEASE_VERIFIED" != "true" ]]; then
+            echo "::error::Release attestation did not become available after 6 attempts"
+            exit 1
+          fi
           gh release view "$TAG" --json assets > "$RUNNER_TEMP/release-assets.json"
           node -e '
             const fs = require("node:fs");
