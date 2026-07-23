@@ -378,6 +378,10 @@ describe("build config", () => {
     expect(releaseJob).toContain("--draft");
     expect(releaseJob).toContain('gh release edit "$TAG" --draft=false');
     expect(releaseJob).toContain('gh release verify "$TAG"');
+    expect(releaseJob).toContain("for ATTEMPT in 1 2 3 4 5 6");
+    expect(releaseJob).toContain(
+      "Release attestation did not become available after 6 attempts",
+    );
     expect(releaseJob).toContain('gh release verify-asset "$TAG" "$ASSET"');
     expect(releaseJob).toContain(
       "draft release asset set is incomplete or unexpected",
