@@ -7,7 +7,12 @@ import { execa } from "execa";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { CanonicalSession } from "../src/adapters/types.js";
 import { parseSince, parseUntil } from "../src/commands/_filters.js";
-import { openDb } from "../src/db/client.js";
+import {
+  CODEX_TOKEN_USAGE_BACKFILL_META_KEY,
+  getMeta,
+  openDb,
+  upsertMeta,
+} from "../src/db/client.js";
 import { upsertSession } from "../src/db/writer.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -452,6 +457,517 @@ describe("agentmine top tokens", () => {
         "s-gpt",
         "s-haiku",
       ]);
+    },
+    CLI_TEST_TIMEOUT,
+  );
+
+  it(
+    "prices cached Codex input once while preserving disjoint source counters",
+    async () => {
+      const db = openDb({ path: dbPath });
+      upsertSession(
+        db,
+        makeSession({
+          id: "s-codex-cache",
+          source: "codex",
+          model: "priced-test",
+          inputTokens: 1_000_000,
+          outputTokens: 100_000,
+          cacheReadTokens: 700_000,
+          cacheCreationTokens: 100_000,
+        }),
+      );
+      upsertSession(
+        db,
+        makeSession({
+          id: "s-cline-cache",
+          source: "cline",
+          model: "priced-test",
+          inputTokens: 1_000_000,
+          outputTokens: 100_000,
+          cacheReadTokens: 700_000,
+          cacheCreationTokens: 100_000,
+        }),
+      );
+      upsertSession(
+        db,
+        makeSession({
+          id: "s-qwen-cache",
+          source: "qwen",
+          model: "priced-test",
+          inputTokens: 1_000_000,
+          outputTokens: 100_000,
+          cacheReadTokens: 700_000,
+        }),
+      );
+      upsertSession(
+        db,
+        makeSession({
+          id: "s-disjoint-cache",
+          source: "claude-code",
+          model: "priced-test",
+          inputTokens: 1_000_000,
+          outputTokens: 100_000,
+          cacheReadTokens: 700_000,
+          cacheCreationTokens: 100_000,
+        }),
+      );
+      upsertSession(
+        db,
+        makeSession({
+          id: "s-gemini-cache",
+          source: "gemini",
+          model: "priced-test",
+          inputTokens: 1_000_000,
+          outputTokens: 100_000,
+          cacheReadTokens: 700_000,
+          cacheCreationTokens: 100_000,
+        }),
+      );
+      db.prepare(
+        `INSERT INTO model_prices
+           (model, input_per_mtok, output_per_mtok, cache_read_per_mtok,
+            cache_write_per_mtok, source)
+         VALUES ('priced-test', 10, 20, 1, 12.5, 'snapshot')`,
+      ).run();
+      db.close();
+
+      const { exitCode, stdout } = await runCli(
+        ["top", "tokens", "--by", "session", "--limit", "10"],
+        dbPath,
+      );
+      expect(exitCode).toBe(0);
+      const parsed = JSON.parse(stdout.trim());
+      const rows = parsed.data.rows as Array<{
+        session_id: string;
+        billable_input_tokens: number;
+        cost_usd: number;
+      }>;
+      const codex = rows.find((row) => row.session_id === "s-codex-cache");
+      const cline = rows.find((row) => row.session_id === "s-cline-cache");
+      const disjoint = rows.find(
+        (row) => row.session_id === "s-disjoint-cache",
+      );
+      const qwen = rows.find((row) => row.session_id === "s-qwen-cache");
+      const gemini = rows.find((row) => row.session_id === "s-gemini-cache");
+      expect(codex?.billable_input_tokens).toBe(200_000);
+      expect(codex?.cost_usd).toBe(5.95);
+      expect(cline?.billable_input_tokens).toBe(200_000);
+      expect(cline?.cost_usd).toBe(5.95);
+      expect(qwen?.billable_input_tokens).toBe(300_000);
+      expect(qwen?.cost_usd).toBe(5.7);
+      expect(gemini?.billable_input_tokens).toBe(1_000_000);
+      expect(gemini?.cost_usd).toBe(13.95);
+      expect(disjoint?.billable_input_tokens).toBe(1_000_000);
+      expect(disjoint?.cost_usd).toBe(13.95);
+    },
+    CLI_TEST_TIMEOUT,
+  );
+
+  it(
+    "prices source-aware reasoning once and discloses unknown overlap semantics",
+    async () => {
+      const db = openDb({ path: dbPath });
+      upsertSession(
+        db,
+        makeSession({
+          id: "s-codex-reasoning-only",
+          source: "codex",
+          model: "reasoning-model",
+          reasoningTokens: 100_000,
+        }),
+      );
+      upsertSession(
+        db,
+        makeSession({
+          id: "s-gemini-reasoning",
+          source: "gemini",
+          model: "reasoning-model",
+          outputTokens: 100_000,
+          reasoningTokens: 50_000,
+        }),
+      );
+      upsertSession(
+        db,
+        makeSession({
+          id: "s-custom-ambiguous",
+          source: "custom-agent",
+          model: "reasoning-model",
+          inputTokens: 1_000_000,
+          outputTokens: 100_000,
+          cacheReadTokens: 800_000,
+          reasoningTokens: 50_000,
+        }),
+      );
+      db.prepare(
+        `INSERT INTO model_prices
+           (model, input_per_mtok, output_per_mtok, cache_read_per_mtok,
+            cache_write_per_mtok, source)
+         VALUES ('reasoning-model', 10, 20, 2, 12.5, 'snapshot')`,
+      ).run();
+      db.close();
+
+      const { exitCode, stdout } = await runCli(
+        ["top", "tokens", "--by", "session", "--limit", "10"],
+        dbPath,
+      );
+      expect(exitCode).toBe(0);
+      const parsed = JSON.parse(stdout.trim());
+      const rows = parsed.data.rows as Array<{
+        session_id: string;
+        billable_input_tokens: number;
+        billable_output_tokens: number;
+        cost_usd: number;
+        unpriced: number;
+      }>;
+      expect(
+        rows.find((row) => row.session_id === "s-codex-reasoning-only"),
+      ).toMatchObject({
+        billable_output_tokens: 100_000,
+        cost_usd: 2,
+        unpriced: 0,
+      });
+      expect(
+        rows.find((row) => row.session_id === "s-gemini-reasoning"),
+      ).toMatchObject({
+        billable_output_tokens: 150_000,
+        cost_usd: 3,
+        unpriced: 0,
+      });
+      expect(
+        rows.find((row) => row.session_id === "s-custom-ambiguous"),
+      ).toMatchObject({
+        billable_input_tokens: 0,
+        billable_output_tokens: 100_000,
+        cost_usd: 3.6,
+        unpriced: 1,
+      });
+      expect(parsed.warnings).toContainEqual(
+        expect.objectContaining({ name: "INCOMPLETE_PRICING" }),
+      );
+    },
+    CLI_TEST_TIMEOUT,
+  );
+
+  it(
+    "includes cache-only partial sessions and prices their available category",
+    async () => {
+      const db = openDb({ path: dbPath });
+      upsertSession(
+        db,
+        makeSession({
+          id: "s-cache-only",
+          source: "codex",
+          model: "cache-only-model",
+          cacheReadTokens: 100_000,
+        }),
+      );
+      db.prepare(
+        `INSERT INTO model_prices
+           (model, input_per_mtok, output_per_mtok, cache_read_per_mtok,
+            cache_write_per_mtok, source)
+         VALUES ('cache-only-model', 10, 20, 2, 12.5, 'snapshot')`,
+      ).run();
+      db.close();
+
+      const { exitCode, stdout } = await runCli(
+        ["top", "tokens", "--by", "session", "--limit", "10"],
+        dbPath,
+      );
+      expect(exitCode).toBe(0);
+      const parsed = JSON.parse(stdout.trim());
+      const row = (
+        parsed.data.rows as Array<{
+          session_id: string;
+          billable_input_tokens: number;
+          cache_read_tokens: number;
+          cost_usd: number;
+        }>
+      ).find((candidate) => candidate.session_id === "s-cache-only");
+      expect(row).toMatchObject({
+        billable_input_tokens: 0,
+        cache_read_tokens: 100_000,
+        cost_usd: 0.2,
+      });
+    },
+    CLI_TEST_TIMEOUT,
+  );
+
+  it(
+    "refuses token costs while the schema-v15 Codex backfill is pending",
+    async () => {
+      const db = openDb({ path: dbPath });
+      upsertSession(
+        db,
+        makeSession({
+          id: "s-stale-codex",
+          source: "codex",
+          model: "gpt-5.6-sol",
+          inputTokens: 1_100_000,
+          outputTokens: 100_000,
+          cacheReadTokens: 900_000,
+        }),
+      );
+      upsertMeta(db, "schema_version", "14");
+      db.close();
+
+      const sync = await runCli(["prices", "sync"], dbPath);
+      expect(sync.exitCode).toBe(0);
+
+      const migrated = openDb({ readonly: true, init: false, path: dbPath });
+      const stale = migrated
+        .prepare<
+          [],
+          { input_tokens: number | null; output_tokens: number | null }
+        >(
+          `SELECT input_tokens, output_tokens
+             FROM sessions WHERE id = 's-stale-codex'`,
+        )
+        .get();
+      expect(stale).toEqual({ input_tokens: null, output_tokens: null });
+      expect(getMeta(migrated, CODEX_TOKEN_USAGE_BACKFILL_META_KEY)).toBe("1");
+      migrated.close();
+
+      const top = await runCli(["top", "tokens", "--by", "session"], dbPath);
+      expect(top.exitCode).toBe(3);
+      const parsed = JSON.parse(top.stdout.trim());
+      expect(parsed.status).toBe("error");
+      expect(parsed.errors).toContainEqual(
+        expect.objectContaining({
+          name: "DB_ERROR",
+          message: expect.stringContaining(
+            "codex_token_usage_backfill_remaining is 0",
+          ),
+        }),
+      );
+    },
+    CLI_TEST_TIMEOUT,
+  );
+
+  it("refuses malformed persisted token counters instead of returning negative cost", async () => {
+    const db = openDb({ path: dbPath });
+    upsertSession(
+      db,
+      makeSession({
+        id: "s-negative-usage",
+        source: "codex",
+        model: "gpt-5.4",
+        inputTokens: -1_000_000,
+        outputTokens: -150_000,
+        cacheReadTokens: -800_000,
+      }),
+    );
+    db.close();
+
+    const { exitCode, stdout } = await runCli(
+      ["top", "tokens", "--by", "session"],
+      dbPath,
+    );
+    expect(exitCode).toBe(3);
+    expect(JSON.parse(stdout.trim())).toMatchObject({
+      status: "error",
+      errors: [
+        {
+          name: "DB_ERROR",
+          message: expect.stringContaining("malformed token counters"),
+        },
+      ],
+    });
+    expect(stdout).not.toContain('"cost_usd":-');
+  });
+
+  it("scopes malformed-counter validation to rows included in the grouping", async () => {
+    const db = openDb({ path: dbPath });
+    upsertSession(
+      db,
+      makeSession({
+        id: "s-negative-without-model",
+        source: "codex",
+        model: undefined,
+        inputTokens: -1,
+      }),
+    );
+    db.close();
+
+    const { exitCode, stdout } = await runCli(
+      ["top", "tokens", "--by", "model"],
+      dbPath,
+    );
+    expect(exitCode).toBe(0);
+    const rows = JSON.parse(stdout.trim()).data.rows as Array<{
+      model: string;
+    }>;
+    expect(rows).toHaveLength(3);
+    expect(rows).not.toContainEqual(expect.objectContaining({ model: null }));
+  });
+
+  it("refuses stale Codex costs when schema metadata is only partially numeric", async () => {
+    const db = openDb({ path: dbPath });
+    upsertSession(
+      db,
+      makeSession({
+        id: "s-invalid-schema-version",
+        source: "codex",
+        model: "gpt-5.4",
+        inputTokens: 100,
+      }),
+    );
+    upsertMeta(db, "schema_version", "15junk");
+    db.close();
+
+    const { exitCode, stdout } = await runCli(
+      ["top", "tokens", "--by", "session"],
+      dbPath,
+    );
+    expect(exitCode).toBe(3);
+    expect(JSON.parse(stdout.trim())).toMatchObject({
+      status: "error",
+      errors: [
+        {
+          name: "DB_ERROR",
+          message: expect.stringContaining("backfill is pending"),
+        },
+      ],
+    });
+  });
+
+  it("refuses a future corpus schema without changing it", async () => {
+    const db = openDb({ path: dbPath });
+    upsertMeta(db, "schema_version", "16");
+    db.close();
+
+    const { exitCode, stdout } = await runCli(
+      ["top", "tokens", "--by", "session"],
+      dbPath,
+    );
+    expect(exitCode).toBe(3);
+    expect(JSON.parse(stdout.trim())).toMatchObject({
+      status: "error",
+      errors: [
+        {
+          name: "DB_ERROR",
+          message: expect.stringContaining("schema version 16 is newer"),
+        },
+      ],
+    });
+  });
+
+  it(
+    "marks NULL price rows as incomplete instead of reporting a complete zero cost",
+    async () => {
+      const db = openDb({ path: dbPath });
+      upsertSession(
+        db,
+        makeSession({
+          id: "s-unpriced",
+          model: "unknown-priced-model",
+          inputTokens: 1_000,
+          outputTokens: 100,
+        }),
+      );
+      db.prepare(
+        `INSERT INTO model_prices
+           (model, input_per_mtok, output_per_mtok, cache_read_per_mtok,
+            cache_write_per_mtok, source)
+         VALUES ('unknown-priced-model', NULL, NULL, NULL, NULL, 'snapshot')`,
+      ).run();
+      upsertSession(
+        db,
+        makeSession({
+          id: "s-priced-top",
+          model: "priced-top-model",
+          inputTokens: 2_000_000,
+          outputTokens: 100,
+        }),
+      );
+      db.prepare(
+        `INSERT INTO model_prices
+           (model, input_per_mtok, output_per_mtok, cache_read_per_mtok,
+            cache_write_per_mtok, source)
+         VALUES ('priced-top-model', 1, 1, 1, 1, 'snapshot')`,
+      ).run();
+      db.close();
+
+      const { exitCode, stdout } = await runCli(
+        ["top", "tokens", "--by", "model", "--limit", "10"],
+        dbPath,
+      );
+      expect(exitCode).toBe(0);
+      const parsed = JSON.parse(stdout.trim());
+      const row = (
+        parsed.data.rows as Array<{
+          model: string;
+          cost_usd: number;
+          unpriced_sessions: number;
+        }>
+      ).find((candidate) => candidate.model === "unknown-priced-model");
+      expect(row?.cost_usd).toBe(0);
+      expect(row?.unpriced_sessions).toBe(1);
+      expect(parsed.warnings).toContainEqual(
+        expect.objectContaining({ name: "INCOMPLETE_PRICING" }),
+      );
+
+      const limited = await runCli(
+        ["top", "tokens", "--by", "model", "--limit", "1"],
+        dbPath,
+      );
+      const limitedParsed = JSON.parse(limited.stdout.trim());
+      expect(limitedParsed.data.rows).toHaveLength(1);
+      expect(limitedParsed.data.rows[0].model).toBe("priced-top-model");
+      expect(limitedParsed.warnings).toContainEqual(
+        expect.objectContaining({
+          name: "INCOMPLETE_PRICING",
+          message: expect.stringContaining("4 session"),
+        }),
+      );
+    },
+    CLI_TEST_TIMEOUT,
+  );
+
+  it(
+    "marks a session incomplete when one used token category lacks a price",
+    async () => {
+      const db = openDb({ path: dbPath });
+      upsertSession(
+        db,
+        makeSession({
+          id: "s-missing-cache-write-price",
+          model: "partial-price-model",
+          inputTokens: 1_000_000,
+          outputTokens: 100_000,
+          cacheCreationTokens: 200_000,
+        }),
+      );
+      db.prepare(
+        `INSERT INTO model_prices
+           (model, input_per_mtok, output_per_mtok, cache_read_per_mtok,
+            cache_write_per_mtok, source)
+         VALUES ('partial-price-model', 2, 10, 1, NULL, 'snapshot')`,
+      ).run();
+      db.close();
+
+      const { exitCode, stdout } = await runCli(
+        ["top", "tokens", "--by", "session", "--limit", "10"],
+        dbPath,
+      );
+      expect(exitCode).toBe(0);
+      const parsed = JSON.parse(stdout.trim());
+      const row = (
+        parsed.data.rows as Array<{
+          session_id: string;
+          cost_usd: number;
+          unpriced: number;
+        }>
+      ).find(
+        (candidate) => candidate.session_id === "s-missing-cache-write-price",
+      );
+      expect(row).toMatchObject({ cost_usd: 3, unpriced: 1 });
+      expect(parsed.warnings).toContainEqual(
+        expect.objectContaining({
+          name: "INCOMPLETE_PRICING",
+          message: expect.stringContaining("lower bound"),
+        }),
+      );
     },
     CLI_TEST_TIMEOUT,
   );

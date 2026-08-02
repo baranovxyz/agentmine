@@ -5,6 +5,8 @@
  * CanonicalSession shape.
  */
 
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -125,6 +127,57 @@ describe("canonical seam — parseCodexFile lineage", () => {
     expect(session?.id).toBe(id);
     expect(session?.parentSessionId).toBe(parentSessionId);
     expect(session?.agentType).toBe(agentType);
+  });
+
+  it("rejects malformed negative token counters from the shared parser", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "agentmine-negative-codex-"));
+    const fixture = join(dir, "negative.jsonl");
+    try {
+      writeFileSync(
+        fixture,
+        [
+          {
+            timestamp: "2026-07-01T10:00:00.000Z",
+            type: "session_meta",
+            payload: { id: "negative-usage", cwd: "/workspace/example" },
+          },
+          {
+            timestamp: "2026-07-01T10:00:01.000Z",
+            type: "turn_context",
+            payload: { turn_id: "t1", model: "gpt-5.4" },
+          },
+          {
+            timestamp: "2026-07-01T10:00:02.000Z",
+            type: "response_item",
+            payload: {
+              type: "message",
+              role: "user",
+              content: [{ type: "input_text", text: "price this session" }],
+            },
+          },
+          {
+            timestamp: "2026-07-01T10:00:03.000Z",
+            type: "event_msg",
+            payload: {
+              type: "token_count",
+              info: {
+                total_token_usage: {
+                  input_tokens: -100,
+                  output_tokens: -10,
+                  cached_input_tokens: -80,
+                },
+              },
+            },
+          },
+        ]
+          .map((record) => JSON.stringify(record))
+          .join("\n"),
+      );
+
+      await expect(parseCodexFile(fixture)).rejects.toThrow(/inputTokens/u);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

@@ -25,8 +25,8 @@ importers:
         specifier: ^22.20.1
         version: 22.20.1
       agent-canonical:
-        specifier: 0.1.6
-        version: 0.1.6(zod@4.4.3)
+        specifier: 0.1.8
+        version: 0.1.8(zod@4.4.3)
       bun:
         specifier: 1.3.14
         version: 1.3.14
@@ -687,8 +687,8 @@ packages:
     engines: {node: '>=0.4.0'}
     hasBin: true
 
-  agent-canonical@0.1.6:
-    resolution: {integrity: sha512-rWgwpJuO5PZunmMs8wkd0eC+0G1ePQmEo8DIkWNHN2oTCkI1Y8wSmFb+q6Hwh3mKqaYRmbyxafE7ttUlVJX0mw==}
+  agent-canonical@0.1.8:
+    resolution: {integrity: sha512-trXHEqz3pF4THMmQ/You2L1DisEWQKvRH9Hwk/ePflhPHY/1vIYdAN4nxIxzjpuD5L4ryjmBpNb3Td/4Zz4zyA==}
     engines: {node: '>=18'}
     peerDependencies:
       zod: ^4.4.3
@@ -1550,7 +1550,7 @@ snapshots:
 
   acorn@8.17.0: {}
 
-  agent-canonical@0.1.6(zod@4.4.3):
+  agent-canonical@0.1.8(zod@4.4.3):
     dependencies:
       zod: 4.4.3
 

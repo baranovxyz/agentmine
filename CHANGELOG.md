@@ -3,6 +3,15 @@
 Notable Agentmine changes only. Keep this file short; detailed implementation notes belong in
 commit history and release notes.
 
+## 0.7.1 - 2026-08-02
+
+- Correct Codex fork usage and cache-cost accounting, preserve cache-write tokens, and report
+  incomplete model prices as lower-bound estimates.
+- Reparse cached Codex sessions once during ordinary post-upgrade normalize or ingest so existing
+  corpora receive corrected usage without `--force`.
+- Reject malformed token counters and future database schemas before pricing or mutation.
+- Keep dry runs read-only and serialize every migration-capable database writer.
+
 ## 0.7.0 - 2026-07-23
 
 - Distribution: publish Linux x64, macOS x64, and macOS arm64 standalone executables alongside

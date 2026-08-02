@@ -42,7 +42,15 @@ import {
 } from "agent-canonical/parsers/opencode";
 import { parseSessionFile as parseQwenSessionFile } from "agent-canonical/parsers/qwen";
 import type { Session } from "agent-canonical/schemas";
-import type { CanonicalSession } from "./types.js";
+import { type CanonicalSession, SessionSchema } from "./types.js";
+
+const CanonicalTokenUsageSchema = SessionSchema.pick({
+  inputTokens: true,
+  outputTokens: true,
+  cacheReadTokens: true,
+  cacheCreationTokens: true,
+  reasoningTokens: true,
+});
 
 // ---------------------------------------------------------------------------
 // flattenSession
@@ -92,6 +100,7 @@ export function flattenSession(s: Session): CanonicalSession {
   if (t.abortedTurns !== undefined) flat.abortedTurns = t.abortedTurns;
   if (t.redactionCount !== undefined) flat.redactionCount = t.redactionCount;
 
+  CanonicalTokenUsageSchema.parse(flat);
   return flat;
 }
 

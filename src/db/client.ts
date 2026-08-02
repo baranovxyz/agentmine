@@ -7,8 +7,11 @@ import { Database } from "./sqlite.js";
 
 type DatabaseType = Database;
 
-const SCHEMA_VERSION = "14";
+export const CURRENT_SCHEMA_VERSION = 15;
+const SCHEMA_VERSION = String(CURRENT_SCHEMA_VERSION);
 export const CODEX_LINEAGE_BACKFILL_META_KEY = "codex_lineage_backfill_pending";
+export const CODEX_TOKEN_USAGE_BACKFILL_META_KEY =
+  "codex_token_usage_backfill_pending";
 
 /** Defensive busy timeout (ms); generous vs. our short transactions. See db/lock.ts. */
 const BUSY_TIMEOUT_MS = 15_000;
@@ -19,6 +22,20 @@ export interface OpenDbOptions {
   init?: boolean;
   /** Override DB path. Default: config.getDbPath(). */
   path?: string;
+}
+
+/** Parse persisted schema metadata without accepting partial or unsafe numbers. */
+export function parseStoredSchemaVersion(value: string | undefined): number {
+  if (value === undefined || !/^(?:0|[1-9]\d*)$/u.test(value)) return 0;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) ? parsed : 0;
+}
+
+function storedSchemaVersionIsFuture(value: string | undefined): boolean {
+  if (value === undefined || !/^(?:0|[1-9]\d*)$/u.test(value)) return false;
+  const current = String(CURRENT_SCHEMA_VERSION);
+  if (value.length !== current.length) return value.length > current.length;
+  return value > current;
 }
 
 export function dbExists(path?: string): boolean {
@@ -44,6 +61,23 @@ export function openDb(opts: OpenDbOptions = {}): DatabaseType {
   }
 
   const db = new Database(path, { readonly });
+  // Refuse future schemas before any PRAGMA that can mutate the database or
+  // create sidecars. An older binary must leave a newer corpus's schema and
+  // journaling state under the newer version's ownership.
+  const storedSchemaVersion = tableExists(db, "meta")
+    ? getMeta(db, "schema_version")
+    : undefined;
+  if (storedSchemaVersionIsFuture(storedSchemaVersion)) {
+    const displayedVersion =
+      storedSchemaVersion !== undefined && storedSchemaVersion.length <= 32
+        ? ` ${storedSchemaVersion}`
+        : "";
+    db.close();
+    throw Errors.dbError(
+      `Database schema version${displayedVersion} is newer than Agentmine supports (${CURRENT_SCHEMA_VERSION}). Upgrade Agentmine before opening this corpus.`,
+    );
+  }
+
   // Setting WAL can create or update sidecar files. A read-only connection
   // must inherit the database's existing journal mode instead of requesting a
   // write; bun:sqlite rejects that write while node:sqlite may appear to allow
@@ -66,23 +100,21 @@ export function openDb(opts: OpenDbOptions = {}): DatabaseType {
 }
 
 function applyDataMigrations(db: DatabaseType): void {
-  const storedVersion = Number.parseInt(
-    getMeta(db, "schema_version") ?? "0",
-    10,
+  const currentVersion = parseStoredSchemaVersion(
+    getMeta(db, "schema_version"),
   );
-  const currentVersion = Number.isSafeInteger(storedVersion)
-    ? storedVersion
-    : 0;
 
-  if (currentVersion < 14 && tableExists(db, "sessions")) {
-    const legacyCodexSessions =
-      db
-        .prepare<[], { count: number }>(
-          `SELECT COUNT(*) AS count FROM sessions WHERE source = 'codex'`,
-        )
-        .get()?.count ?? 0;
-    if (legacyCodexSessions === 0) return;
+  if (!tableExists(db, "sessions")) return;
 
+  const legacyCodexSessions =
+    db
+      .prepare<[], { count: number }>(
+        `SELECT COUNT(*) AS count FROM sessions WHERE source = 'codex'`,
+      )
+      .get()?.count ?? 0;
+  if (legacyCodexSessions === 0) return;
+
+  if (currentVersion < 14) {
     // Before canonical Codex lineage support, the parser copied the client
     // originator (for example, `codex-tui`) into agent_type for every session.
     // agent_type now classifies only children; roots intentionally leave it
@@ -105,6 +137,25 @@ function applyDataMigrations(db: DatabaseType): void {
         WHERE source = 'codex'`,
     ).run();
     upsertMeta(db, CODEX_LINEAGE_BACKFILL_META_KEY, "1");
+  }
+
+  if (currentVersion < 15) {
+    // agent-canonical 0.1.8 changes Codex usage from the rollout's final
+    // cumulative snapshot to current-task request deltas. Canonical content
+    // hashes intentionally exclude derived metadata, so invalidate every
+    // cached Codex row once and keep a durable marker until the mirror has
+    // been reparsed successfully.
+    db.prepare(
+      `UPDATE sessions
+          SET content_hash = NULL,
+              input_tokens = NULL,
+              output_tokens = NULL,
+              cache_read_tokens = NULL,
+              cache_creation_tokens = NULL,
+              reasoning_tokens = NULL
+        WHERE source = 'codex'`,
+    ).run();
+    upsertMeta(db, CODEX_TOKEN_USAGE_BACKFILL_META_KEY, "1");
   }
 }
 

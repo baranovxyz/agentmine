@@ -3,6 +3,7 @@ import { Errors } from "../contract/errors.js";
 import { reportProgressImmediate } from "../contract/progress.js";
 import { runCommand } from "../contract/result.js";
 import { type DatabaseType, dbExists, openDb } from "../db/client.js";
+import { withWriteLock } from "../db/lock.js";
 import {
   fetchLiteLLMPrices,
   type RawPriceMap,
@@ -113,26 +114,31 @@ const syncCommand = defineCommand({
         const map: RawPriceMap = online
           ? await fetchLiteLLMPrices(process.env.AGENTMINE_LITELLM_PRICE_URL)
           : PRICE_SNAPSHOT;
-        const db = openDb();
-        try {
-          const result = syncPrices(db, map, online ? "litellm" : "snapshot");
-          reportProgressImmediate("prices.done", { ...result });
-          return {
-            data: result,
-            ...(result.unpriced.length > 0
-              ? {
-                  warnings: [
-                    {
-                      name: "UNPRICED_MODELS",
-                      message: `No price for ${result.unpriced.length} model(s): ${result.unpriced.join(", ")}. Their token cost reads as 0 in \`top tokens\`. Add them to the snapshot or run \`prices sync --online\`.`,
-                    },
-                  ],
-                }
-              : {}),
-          };
-        } finally {
-          db.close();
-        }
+        const result = await withWriteLock(
+          { command: "agentmine prices sync" },
+          () => {
+            const db = openDb();
+            try {
+              return syncPrices(db, map, online ? "litellm" : "snapshot");
+            } finally {
+              db.close();
+            }
+          },
+        );
+        reportProgressImmediate("prices.done", { ...result });
+        return {
+          data: result,
+          ...(result.unpriced.length > 0
+            ? {
+                warnings: [
+                  {
+                    name: "UNPRICED_MODELS",
+                    message: `No price for ${result.unpriced.length} model(s): ${result.unpriced.join(", ")}. \`top tokens\` excludes their usage from cost_usd, marks the result as a lower bound, and counts affected sessions. Add them to the snapshot or run \`prices sync --online\`.`,
+                  },
+                ],
+              }
+            : {}),
+        };
       },
     });
   },

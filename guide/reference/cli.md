@@ -23,7 +23,7 @@ agent-friendly JSON envelope — see the
 | `agentmine top commands --failed --limit 20` | Rank commands, optionally failed-only |
 | `agentmine top corrections --by kind` | Rank user corrections by kind |
 | `agentmine top skills` | Rank skills used |
-| `agentmine top tokens --by model\|project\|session\|day\|source` | Rank by token volume + USD cost (run `prices sync` first; unpriced models report 0 + `unpriced_sessions`) |
+| `agentmine top tokens --by model\|project\|session\|day\|source` | Rank by token volume + USD cost (run `prices sync` first; incomplete prices make `cost_usd` a lower bound and increment `unpriced_sessions`) |
 | `agentmine top sequences --project '/path/to/repo%' --n 3` | Re-aggregate ngrams scoped to a `project_path` LIKE pattern |
 | `agentmine timeline --bucket week` | Activity timeline |
 | `agentmine workflows --sort tokens` | Rank Claude Code workflow runs by start time, tokens, duration, agents, or name |
