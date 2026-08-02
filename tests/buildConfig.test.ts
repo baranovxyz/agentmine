@@ -32,6 +32,7 @@ function escapeRegexLiteral(value: string): string {
 }
 
 const PackageJsonSchema = z.object({
+  version: z.string(),
   scripts: z.object({
     build: z.string(),
     "build:standalone": z.string(),
@@ -59,12 +60,28 @@ describe("build config", () => {
     expect(pkg.devDependencies ?? {}).toHaveProperty("tsup");
     // agent-canonical must be pinned to an exact published version — never
     // `workspace:*` or a caret/tilde range — so the standalone public
-    // dependency graph is deterministic and publication-safe. Assert the pin
-    // shape, not the number, so version bumps don't churn this test.
+    // dependency graph is deterministic and publication-safe. The private
+    // workspace must carry the same source version that the public artifact
+    // consumes, otherwise a stale sibling build can make local gates lie.
     expect(pkg.devDependencies ?? {}).toHaveProperty("agent-canonical");
     expect(pkg.devDependencies?.["agent-canonical"]).toMatch(
       /^\d+\.\d+\.\d+$/u,
     );
+    const canonicalPackagePath = join(
+      REPO,
+      "..",
+      "agent-canonical",
+      "package.json",
+    );
+    if (existsSync(canonicalPackagePath)) {
+      const canonicalPackageJson: unknown = JSON.parse(
+        readFileSync(canonicalPackagePath, "utf8"),
+      );
+      const canonicalVersion = z
+        .object({ version: z.string() })
+        .parse(canonicalPackageJson).version;
+      expect(pkg.devDependencies?.["agent-canonical"]).toBe(canonicalVersion);
+    }
     expect(pkg.devDependencies?.bun).toBe("1.3.14");
     expect(existsSync(join(REPO, "tsup.config.ts"))).toBe(true);
 

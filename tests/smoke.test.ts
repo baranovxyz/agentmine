@@ -5,6 +5,7 @@ import {
   mkdirSync,
   mkdtempSync,
   rmSync,
+  statSync,
   utimesSync,
   writeFileSync,
 } from "node:fs";
@@ -17,11 +18,13 @@ import { z } from "zod";
 import { parseCodexFile } from "../src/adapters/canonical.js";
 import {
   CODEX_LINEAGE_BACKFILL_META_KEY,
+  CODEX_TOKEN_USAGE_BACKFILL_META_KEY,
   getMeta,
   openDb,
   upsertMeta,
 } from "../src/db/client.js";
-import { upsertSession } from "../src/db/writer.js";
+import { acquireWriteLock } from "../src/db/lock.js";
+import { recordFileStat, upsertSession } from "../src/db/writer.js";
 import { runAllExtractors } from "../src/extract/index.js";
 import { VERSION } from "../src/version.js";
 
@@ -1504,6 +1507,7 @@ describe("cli envelope", () => {
         processed: 0,
       });
       expect(freshResult.data.codex_lineage_backfill).toBeUndefined();
+      expect(freshResult.data.codex_token_usage_backfill).toBeUndefined();
 
       const legacy = openDb({ path: dbPath });
       upsertSession(legacy, { ...root, agentType: "codex-tui" });
@@ -1529,6 +1533,7 @@ describe("cli envelope", () => {
         processed: 2,
         dry_run: true,
         codex_lineage_backfill: true,
+        codex_token_usage_backfill: true,
       });
       const untouched = openDb({ readonly: true, init: false, path: dbPath });
       const untouchedChild = untouched
@@ -1545,6 +1550,9 @@ describe("cli envelope", () => {
       expect(
         getMeta(untouched, CODEX_LINEAGE_BACKFILL_META_KEY),
       ).toBeUndefined();
+      expect(
+        getMeta(untouched, CODEX_TOKEN_USAGE_BACKFILL_META_KEY),
+      ).toBeUndefined();
       untouched.close();
 
       // Simulate an incomplete sync: the migration runs while the old Codex
@@ -1552,6 +1560,28 @@ describe("cli envelope", () => {
       // all-source normalize useful work to do.
       rmSync(rootRaw);
       rmSync(childRaw);
+      const missingCodexRun = await runCli(
+        ["normalize", "--source", "codex", "--since", "1d"],
+        {
+          AGENTMINE_DB: dbPath,
+          HOME: dir,
+          XDG_DATA_HOME: dataHome,
+        },
+      );
+      expect(missingCodexRun.exitCode).toBe(0);
+      expect(JSON.parse(missingCodexRun.stdout.trim()).data).toMatchObject({
+        files_scanned: 0,
+        processed: 0,
+        codex_lineage_backfill: true,
+        codex_token_usage_backfill: true,
+        codex_token_usage_backfill_remaining: 2,
+      });
+      expect(JSON.parse(missingCodexRun.stdout.trim()).warnings).toContainEqual(
+        expect.objectContaining({
+          name: "CODEX_TOKEN_USAGE_BACKFILL_PENDING",
+        }),
+      );
+
       copyFileSync(
         join(__dirname, "fixtures", "qwen", "tiny.jsonl"),
         join(qwenRawDir, "tiny.jsonl"),
@@ -1566,9 +1596,17 @@ describe("cli envelope", () => {
         files_scanned: 1,
         processed_by_source: { qwen: 1 },
         codex_lineage_backfill: true,
+        codex_token_usage_backfill: true,
+        codex_token_usage_backfill_remaining: 2,
       });
+      expect(JSON.parse(incompleteRun.stdout.trim()).warnings).toContainEqual(
+        expect.objectContaining({
+          name: "CODEX_TOKEN_USAGE_BACKFILL_PENDING",
+        }),
+      );
       const pending = openDb({ readonly: true, init: false, path: dbPath });
       expect(getMeta(pending, CODEX_LINEAGE_BACKFILL_META_KEY)).toBe("1");
+      expect(getMeta(pending, CODEX_TOKEN_USAGE_BACKFILL_META_KEY)).toBe("1");
       expect(
         pending
           .prepare<[], { count: number }>(
@@ -1587,22 +1625,50 @@ describe("cli envelope", () => {
       utimesSync(rootRaw, oldMtime, oldMtime);
       utimesSync(childRaw, oldMtime, oldMtime);
 
-      const { exitCode, stdout } = await runCli(
-        ["normalize", "--source", "codex", "--since", "1d"],
+      const failingRoot = join(dir, "failing-source");
+      const failingFile = join(failingRoot, "failure.jsonl");
+      const extensionDir = join(dir, ".config", "agentmine");
+      mkdirSync(failingRoot, { recursive: true });
+      mkdirSync(extensionDir, { recursive: true });
+      writeFileSync(failingFile, "fixture\n");
+      writeFileSync(
+        join(extensionDir, "extensions.js"),
+        [
+          "export default { adapters: [{",
+          '  name: "failing-source",',
+          `  rootPath: ${JSON.stringify(failingRoot)},`,
+          `  listFiles: async () => [${JSON.stringify(failingFile)}],`,
+          '  parse: async () => { throw new Error("synthetic unrelated failure"); },',
+          "}] };",
+          "",
+        ].join("\n"),
+      );
+
+      const { exitCode, stdout, stderr } = await runCli(
+        ["normalize", "--since", "1d"],
         {
           AGENTMINE_DB: dbPath,
           HOME: dir,
           XDG_DATA_HOME: dataHome,
         },
       );
-      expect(exitCode).toBe(0);
+      expect(exitCode, `${stdout}\n${stderr}`).toBe(1);
       const result = JSON.parse(stdout.trim());
       expect(result.data).toMatchObject({
-        files_scanned: 2,
-        processed: 2,
+        processed_by_source: { codex: 2 },
+        failed: 1,
         codex_lineage_backfill: true,
+        codex_token_usage_backfill: true,
+        codex_token_usage_backfill_remaining: 0,
       });
       expect(result.data.since_epoch).toEqual(expect.any(Number));
+      expect(result.warnings).toBeUndefined();
+      expect(result.errors).toContainEqual(
+        expect.objectContaining({
+          name: "PARSE_FAILED",
+          message: expect.stringContaining("synthetic unrelated failure"),
+        }),
+      );
 
       const migrated = openDb({ readonly: true, init: false, path: dbPath });
       const childRow = migrated
@@ -1616,9 +1682,264 @@ describe("cli envelope", () => {
         agent_type: "researcher",
       });
       expect(getMeta(migrated, CODEX_LINEAGE_BACKFILL_META_KEY)).toBe("0");
+      expect(getMeta(migrated, CODEX_TOKEN_USAGE_BACKFILL_META_KEY)).toBe("0");
       migrated.close();
       rmSync(dir, { recursive: true, force: true });
     },
     CLI_TEST_TIMEOUT,
   );
+
+  it(
+    "reparses stat- and content-cached Codex usage during an ordinary v14 upgrade",
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), "agentmine-codex-usage-upgrade-"));
+      const dataHome = join(dir, "data");
+      const rawDir = join(
+        dataHome,
+        "agentmine",
+        "sessions",
+        "codex",
+        "2026",
+        "07",
+        "01",
+      );
+      const dbPath = join(dir, "sessions.db");
+      const rawPath = join(rawDir, "usage-backfill.jsonl");
+      mkdirSync(rawDir, { recursive: true });
+
+      const rollout = [
+        {
+          timestamp: "2026-07-01T10:01:00.000Z",
+          type: "session_meta",
+          payload: {
+            id: "usage-backfill-child",
+            parent_thread_id: "usage-backfill-parent",
+            cwd: "/workspace/example",
+          },
+        },
+        {
+          timestamp: "2026-07-01T09:00:00.000Z",
+          type: "session_meta",
+          payload: { id: "usage-backfill-parent", cwd: "/workspace/example" },
+        },
+        {
+          timestamp: "2026-07-01T09:00:01.000Z",
+          type: "event_msg",
+          payload: { type: "task_started", started_at: 1_782_896_401 },
+        },
+        {
+          timestamp: "2026-07-01T09:00:02.000Z",
+          type: "event_msg",
+          payload: {
+            type: "token_count",
+            info: {
+              total_token_usage: {
+                input_tokens: 1_000,
+                output_tokens: 100,
+                cached_input_tokens: 900,
+              },
+              last_token_usage: {
+                input_tokens: 1_000,
+                output_tokens: 100,
+                cached_input_tokens: 900,
+              },
+            },
+          },
+        },
+        {
+          timestamp: "2026-07-01T10:01:01.000Z",
+          type: "event_msg",
+          payload: { type: "task_started", started_at: 1_782_900_061 },
+        },
+        {
+          timestamp: "2026-07-01T10:01:01.500Z",
+          type: "response_item",
+          payload: {
+            type: "message",
+            role: "user",
+            content: [{ type: "input_text", text: "Inspect the cost report." }],
+          },
+        },
+        {
+          timestamp: "2026-07-01T10:01:02.000Z",
+          type: "event_msg",
+          payload: {
+            type: "token_count",
+            info: {
+              total_token_usage: {
+                input_tokens: 1_100,
+                output_tokens: 115,
+                cached_input_tokens: 980,
+                cache_write_input_tokens: 9,
+              },
+              last_token_usage: {
+                input_tokens: 100,
+                output_tokens: 15,
+                cached_input_tokens: 80,
+                cache_write_input_tokens: 9,
+              },
+            },
+          },
+        },
+      ];
+      writeFileSync(
+        rawPath,
+        `${rollout.map((record) => JSON.stringify(record)).join("\n")}\n`,
+      );
+
+      const parsed = await parseCodexFile(rawPath);
+      expect(parsed).not.toBeNull();
+      if (!parsed) throw new Error("expected Codex usage fixture");
+
+      const legacy = openDb({ path: dbPath });
+      upsertSession(legacy, {
+        ...parsed,
+        inputTokens: 1_100,
+        outputTokens: 115,
+        cacheReadTokens: 980,
+        cacheCreationTokens: undefined,
+      });
+      const rawStat = statSync(rawPath);
+      recordFileStat(legacy, rawPath, {
+        mtimeMs: Math.round(rawStat.mtimeMs),
+        size: rawStat.size,
+      });
+      upsertMeta(legacy, "schema_version", "14");
+      legacy.close();
+
+      const run = await runCli(["normalize", "--source", "codex"], {
+        AGENTMINE_DB: dbPath,
+        HOME: dir,
+        XDG_DATA_HOME: dataHome,
+      });
+      expect(run.exitCode).toBe(0);
+      expect(JSON.parse(run.stdout.trim()).data).toMatchObject({
+        files_scanned: 1,
+        processed: 1,
+        skipped_unchanged: 0,
+        skipped_up_to_date: 0,
+        codex_token_usage_backfill: true,
+        codex_token_usage_backfill_remaining: 0,
+      });
+
+      const migrated = openDb({ readonly: true, init: false, path: dbPath });
+      const usage = migrated
+        .prepare<
+          [],
+          {
+            input_tokens: number;
+            output_tokens: number;
+            cache_read_tokens: number;
+            cache_creation_tokens: number;
+          }
+        >(
+          `SELECT input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens
+             FROM sessions WHERE id = 'cx--usage-backfill-child'`,
+        )
+        .get();
+      expect(usage).toEqual({
+        input_tokens: 100,
+        output_tokens: 15,
+        cache_read_tokens: 80,
+        cache_creation_tokens: 9,
+      });
+      expect(getMeta(migrated, CODEX_TOKEN_USAGE_BACKFILL_META_KEY)).toBe("0");
+      expect(
+        getMeta(migrated, CODEX_LINEAGE_BACKFILL_META_KEY),
+      ).toBeUndefined();
+      expect(getMeta(migrated, "schema_version")).toBe("15");
+      migrated.close();
+      rmSync(dir, { recursive: true, force: true });
+    },
+    CLI_TEST_TIMEOUT,
+  );
+
+  it("serializes prices sync before applying the Codex usage migration", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "agentmine-prices-migration-lock-"));
+    const dbPath = join(dir, "sessions.db");
+    const legacy = openDb({ path: dbPath });
+    upsertSession(legacy, {
+      id: "cx--prices-migration-lock",
+      source: "codex",
+      model: "gpt-5.4",
+      projectPath: "/workspace/example",
+      messages: [],
+      contentHash: "legacy-prices-content",
+      inputTokens: 1_100,
+      outputTokens: 115,
+      cacheReadTokens: 980,
+      cacheCreationTokens: 9,
+      reasoningTokens: 15,
+    });
+    upsertMeta(legacy, "schema_version", "14");
+    legacy.close();
+
+    const held = await acquireWriteLock({
+      command: "agentmine normalize",
+      dbPath,
+    });
+    try {
+      const blocked = await runCli(["prices", "sync"], {
+        AGENTMINE_DB: dbPath,
+        AGENTMINE_LOCK_TIMEOUT_MS: "0",
+      });
+      expect(blocked.exitCode).not.toBe(0);
+      expect(JSON.parse(blocked.stdout.trim())).toMatchObject({
+        status: "error",
+        errors: [{ name: "LOCKED", retryable: true }],
+      });
+
+      const unchanged = openDb({ readonly: true, init: false, path: dbPath });
+      expect(getMeta(unchanged, "schema_version")).toBe("14");
+      expect(
+        getMeta(unchanged, CODEX_TOKEN_USAGE_BACKFILL_META_KEY),
+      ).toBeUndefined();
+      expect(
+        unchanged
+          .prepare(
+            `SELECT content_hash, input_tokens, output_tokens,
+                    cache_read_tokens, cache_creation_tokens, reasoning_tokens
+               FROM sessions WHERE id = 'cx--prices-migration-lock'`,
+          )
+          .get(),
+      ).toEqual({
+        content_hash: "legacy-prices-content",
+        input_tokens: 1_100,
+        output_tokens: 115,
+        cache_read_tokens: 980,
+        cache_creation_tokens: 9,
+        reasoning_tokens: 15,
+      });
+      unchanged.close();
+    } finally {
+      held.release();
+    }
+
+    const synced = await runCli(["prices", "sync"], {
+      AGENTMINE_DB: dbPath,
+    });
+    expect(synced.exitCode).toBe(0);
+
+    const migrated = openDb({ readonly: true, init: false, path: dbPath });
+    expect(getMeta(migrated, "schema_version")).toBe("15");
+    expect(getMeta(migrated, CODEX_TOKEN_USAGE_BACKFILL_META_KEY)).toBe("1");
+    expect(
+      migrated
+        .prepare(
+          `SELECT content_hash, input_tokens, output_tokens,
+                  cache_read_tokens, cache_creation_tokens, reasoning_tokens
+             FROM sessions WHERE id = 'cx--prices-migration-lock'`,
+        )
+        .get(),
+    ).toEqual({
+      content_hash: null,
+      input_tokens: null,
+      output_tokens: null,
+      cache_read_tokens: null,
+      cache_creation_tokens: null,
+      reasoning_tokens: null,
+    });
+    migrated.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
 });

@@ -64,7 +64,7 @@ export const embedCommand = defineCommand({
         // Serialize embedding writes against other agentmine writers. A dry run
         // writes no chunks/vectors/receipts, so it skips the lock.
         const runEmbedOnce = async () => {
-          const db = openDb({ readonly: false });
+          const db = openDb({ readonly: dryRun, init: !dryRun });
           try {
             const data = await runEmbed(db, {
               providerName,

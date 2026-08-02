@@ -8,7 +8,13 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { CanonicalSession } from "../src/adapters/types.js";
 import type { SimilarRow } from "../src/commands/similar.js";
 import { mergeHybridRows } from "../src/commands/similar.js";
-import { type DatabaseType, openDb } from "../src/db/client.js";
+import {
+  CODEX_TOKEN_USAGE_BACKFILL_META_KEY,
+  type DatabaseType,
+  getMeta,
+  openDb,
+  upsertMeta,
+} from "../src/db/client.js";
 import { upsertSession } from "../src/db/writer.js";
 import {
   buildEmbeddingChunks,
@@ -341,6 +347,53 @@ describe("embed command", () => {
     expect(chunks.n).toBe(0);
     expect(vectors.n).toBe(0);
     expect(runs.n).toBe(0);
+  });
+
+  it("dry-run does not migrate or invalidate a legacy Codex database", async () => {
+    const legacy = openDb({ path: dbPath });
+    upsertSession(
+      legacy,
+      makeSession({
+        id: "cx--embed-dry-run-legacy",
+        source: "codex",
+        contentHash: "legacy-codex-hash",
+        inputTokens: 1_100,
+        outputTokens: 115,
+        cacheReadTokens: 980,
+        cacheCreationTokens: 9,
+        reasoningTokens: 15,
+      }),
+    );
+    upsertMeta(legacy, "schema_version", "14");
+    legacy.close();
+
+    const { exitCode, stdout, stderr } = await runCli(
+      ["embed", "--provider", "fake", "--model", "fake", "--dry-run"],
+      { AGENTMINE_DB: dbPath },
+    );
+    expect(exitCode, `${stdout}\n${stderr}`).toBe(0);
+    expect(JSON.parse(stdout.trim()).data.dry_run).toBe(true);
+
+    const check = openDb({ readonly: true, init: false, path: dbPath });
+    expect(getMeta(check, "schema_version")).toBe("14");
+    expect(getMeta(check, CODEX_TOKEN_USAGE_BACKFILL_META_KEY)).toBeUndefined();
+    expect(
+      check
+        .prepare(
+          `SELECT content_hash, input_tokens, output_tokens,
+                  cache_read_tokens, cache_creation_tokens, reasoning_tokens
+             FROM sessions WHERE id = 'cx--embed-dry-run-legacy'`,
+        )
+        .get(),
+    ).toEqual({
+      content_hash: "legacy-codex-hash",
+      input_tokens: 1_100,
+      output_tokens: 115,
+      cache_read_tokens: 980,
+      cache_creation_tokens: 9,
+      reasoning_tokens: 15,
+    });
+    check.close();
   });
 
   it("indexes chunks with fake provider and skips cached chunks on rerun", async () => {

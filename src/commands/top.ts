@@ -1,7 +1,13 @@
 import { defineCommand } from "citty";
 import { Errors } from "../contract/errors.js";
 import { type CommandOutcome, runCommand } from "../contract/result.js";
-import { dbExists, openDb } from "../db/client.js";
+import {
+  CODEX_TOKEN_USAGE_BACKFILL_META_KEY,
+  dbExists,
+  getMeta,
+  openDb,
+  parseStoredSchemaVersion,
+} from "../db/client.js";
 import { aggregateNgrams } from "../extract/ngrams.js";
 import { parseSince, parseUntil } from "./_filters.js";
 
@@ -632,11 +638,97 @@ const topSelfResolutions = defineCommand({
 const TOKENS_BY = ["model", "project", "session", "day", "source"] as const;
 type TokensBy = (typeof TOKENS_BY)[number];
 
+// These source contracts are grounded in provider usage schemas or captured
+// source-reported cost. Claude Code and OpenCode/Kilo expose disjoint input and
+// cache counters. Unknown/custom sources with non-zero cache usage are priced
+// conservatively: keep the cache charge, omit ambiguous input, and disclose a
+// lower bound instead of risking double charging.
+const inputIncludesCache = `s.source IN ('codex', 'qwen', 'cline')`;
+const inputDisjointFromCache = `s.source IN ('claude-code', 'gemini', 'opencode', 'kilo')`;
+const cacheTokens = `COALESCE(s.cache_read_tokens, 0) + COALESCE(s.cache_creation_tokens, 0)`;
+const ambiguousInputSemantics = `NOT (${inputIncludesCache})
+  AND NOT (${inputDisjointFromCache})
+  AND ${cacheTokens} > 0`;
+const malformedTokenUsage = [
+  "input_tokens",
+  "output_tokens",
+  "cache_read_tokens",
+  "cache_creation_tokens",
+  "reasoning_tokens",
+]
+  .map(
+    (column) =>
+      `(s.${column} IS NOT NULL AND (` +
+      `typeof(s.${column}) <> 'integer' OR ` +
+      `s.${column} < 0 OR s.${column} > 9007199254740991))`,
+  )
+  .join(" OR ");
+
+const billableInputTokens = `CASE WHEN ${inputIncludesCache}
+  THEN MAX(
+    COALESCE(s.input_tokens, 0)
+    - COALESCE(s.cache_read_tokens, 0)
+    - COALESCE(s.cache_creation_tokens, 0),
+    0
+  )
+  WHEN ${inputDisjointFromCache} OR ${cacheTokens} = 0
+    THEN COALESCE(s.input_tokens, 0)
+  ELSE 0 END`;
+
+// Codex reports reasoning as a subset of output. Gemini, Qwen, and
+// OpenCode/Kilo preserve it as a disjoint generated-token category. For an
+// unknown/custom source with reasoning, price only its unambiguous output and
+// disclose the omitted category as a lower bound.
+const reasoningDisjointFromOutput = `s.source IN ('gemini', 'qwen', 'opencode', 'kilo')`;
+const ambiguousReasoningSemantics = `s.source <> 'codex'
+  AND NOT (${reasoningDisjointFromOutput})
+  AND COALESCE(s.reasoning_tokens, 0) > 0`;
+const billableOutputTokens = `CASE WHEN s.source = 'codex'
+  THEN MAX(
+    COALESCE(s.output_tokens, 0),
+    COALESCE(s.reasoning_tokens, 0)
+  )
+  WHEN ${reasoningDisjointFromOutput}
+    THEN COALESCE(s.output_tokens, 0) + COALESCE(s.reasoning_tokens, 0)
+  ELSE COALESCE(s.output_tokens, 0) END`;
+
+const pricedCost = `
+    ${billableInputTokens} * COALESCE(p.input_per_mtok, 0)
+  + ${billableOutputTokens} * COALESCE(p.output_per_mtok, 0)
+  + COALESCE(s.cache_read_tokens, 0) * COALESCE(p.cache_read_per_mtok, 0)
+  + COALESCE(s.cache_creation_tokens, 0) * COALESCE(p.cache_write_per_mtok, 0)`;
+
+const incompletePrice = `
+     (${billableInputTokens} > 0 AND p.input_per_mtok IS NULL)
+  OR (${billableOutputTokens} > 0 AND p.output_per_mtok IS NULL)
+  OR (COALESCE(s.cache_read_tokens, 0) > 0 AND p.cache_read_per_mtok IS NULL)
+  OR (COALESCE(s.cache_creation_tokens, 0) > 0 AND p.cache_write_per_mtok IS NULL)
+  OR (${ambiguousInputSemantics})
+  OR (${ambiguousReasoningSemantics})`;
+
+const tokenVolume = `
+    CASE WHEN ${inputDisjointFromCache}
+      THEN COALESCE(s.input_tokens, 0) + ${cacheTokens}
+      ELSE MAX(COALESCE(s.input_tokens, 0), ${cacheTokens})
+    END
+  + CASE WHEN s.source = 'codex'
+      THEN MAX(
+        COALESCE(s.output_tokens, 0),
+        COALESCE(s.reasoning_tokens, 0)
+      )
+      WHEN ${reasoningDisjointFromOutput}
+        THEN COALESCE(s.output_tokens, 0) + COALESCE(s.reasoning_tokens, 0)
+      ELSE MAX(
+        COALESCE(s.output_tokens, 0),
+        COALESCE(s.reasoning_tokens, 0)
+      )
+    END`;
+
 const topTokens = defineCommand({
   meta: {
     name: "tokens",
     description:
-      "Aggregate session token volume + USD cost by model/project/session/day/source. Cost uses the local model_prices table — run `agentmine prices sync` first (LiteLLM data, the same source ccusage uses). Unpriced models contribute 0 and are counted in unpriced_sessions.",
+      "Aggregate session token volume + USD cost by model/project/session/day/source. Cost uses the local model_prices table — run `agentmine prices sync` first (LiteLLM data, the same source ccusage uses). Usage without a complete price is counted in unpriced_sessions and makes cost_usd a lower bound.",
   },
   args: {
     by: {
@@ -666,6 +758,26 @@ const topTokens = defineCommand({
         requireDb();
         const db = openDb({ readonly: true });
         try {
+          const schemaVersion = parseStoredSchemaVersion(
+            getMeta(db, "schema_version"),
+          );
+          const legacyCodexSessions =
+            schemaVersion < 15
+              ? (db
+                  .prepare<[], { count: number }>(
+                    `SELECT COUNT(*) AS count FROM sessions WHERE source = 'codex'`,
+                  )
+                  .get()?.count ?? 0)
+              : 0;
+          if (
+            getMeta(db, CODEX_TOKEN_USAGE_BACKFILL_META_KEY) === "1" ||
+            legacyCodexSessions > 0
+          ) {
+            throw Errors.dbError(
+              "Codex token accounting backfill is pending, so token costs are unavailable. Restore or sync the Codex rollout files, then run `agentmine normalize` or `agentmine ingest` until codex_token_usage_backfill_remaining is 0.",
+            );
+          }
+
           const by = String(args.by) as TokensBy;
           if (!TOKENS_BY.includes(by)) {
             throw Errors.invalidInput(
@@ -682,52 +794,70 @@ const topTokens = defineCommand({
               : null;
 
           const where: string[] = [
-            `(input_tokens IS NOT NULL OR output_tokens IS NOT NULL)`,
+            `(s.input_tokens IS NOT NULL
+              OR s.output_tokens IS NOT NULL
+              OR s.cache_read_tokens IS NOT NULL
+              OR s.cache_creation_tokens IS NOT NULL
+              OR s.reasoning_tokens IS NOT NULL)`,
           ];
           const params: unknown[] = [];
           if (range.since !== null) {
-            where.push(`started_at >= ?`);
+            where.push(`s.started_at >= ?`);
             params.push(range.since);
           }
           if (range.until !== null) {
-            where.push(`started_at < ?`);
+            where.push(`s.started_at < ?`);
             params.push(range.until);
           }
           if (project !== null) {
-            where.push(`project_path LIKE ?`);
+            where.push(`s.project_path LIKE ?`);
             params.push(project);
+          }
+          const groupedValueCondition =
+            by === "day"
+              ? "s.started_at IS NOT NULL"
+              : by === "model"
+                ? "s.model IS NOT NULL"
+                : by === "project"
+                  ? "s.project_path IS NOT NULL"
+                  : by === "source"
+                    ? "s.source IS NOT NULL"
+                    : null;
+
+          const malformedSessions = (
+            db
+              .prepare<unknown[], { count: number }>(
+                `SELECT COUNT(*) AS count
+                     FROM sessions s
+                    WHERE ${where.join(" AND ")}
+                      ${groupedValueCondition === null ? "" : `AND ${groupedValueCondition}`}
+                      AND (${malformedTokenUsage})`,
+              )
+              .get(...params) ?? { count: 0 }
+          ).count;
+          if (malformedSessions > 0) {
+            throw Errors.dbError(
+              `${malformedSessions} session(s) contain malformed token counters. Token costs are unavailable because usage must be non-negative safe integers. Restore or correct the source transcripts, then run \`agentmine normalize --force\` before retrying.`,
+            );
           }
 
           // Per-session cost = tokens × per-1M price / 1e6, summed over the
           // group. Each session has one model; LEFT JOIN model_prices keeps
           // unpriced sessions (NULL price → 0 contribution, counted separately).
-          // reasoning_tokens are excluded from cost (no separate price field).
-          const costSum = `ROUND(SUM(
-              COALESCE(s.input_tokens, 0) * COALESCE(p.input_per_mtok, 0)
-            + COALESCE(s.output_tokens, 0) * COALESCE(p.output_per_mtok, 0)
-            + COALESCE(s.cache_read_tokens, 0) * COALESCE(p.cache_read_per_mtok, 0)
-            + COALESCE(s.cache_creation_tokens, 0) * COALESCE(p.cache_write_per_mtok, 0)
-            ) / 1e6, 4) AS cost_usd`;
+          const costSum = `ROUND(SUM(${pricedCost}) / 1e6, 4) AS cost_usd`;
           const tokenSums = `
             COALESCE(SUM(s.input_tokens), 0) AS input_tokens,
+            COALESCE(SUM(${billableInputTokens}), 0) AS billable_input_tokens,
             COALESCE(SUM(s.output_tokens), 0) AS output_tokens,
+            COALESCE(SUM(${billableOutputTokens}), 0) AS billable_output_tokens,
             COALESCE(SUM(s.cache_creation_tokens), 0) AS cache_creation_tokens,
             COALESCE(SUM(s.cache_read_tokens), 0) AS cache_read_tokens,
             COALESCE(SUM(s.reasoning_tokens), 0) AS reasoning_tokens,
             COUNT(*) AS sessions,
             ${costSum},
-            SUM(CASE WHEN p.model IS NULL
-                      AND (s.input_tokens IS NOT NULL OR s.output_tokens IS NOT NULL)
-                     THEN 1 ELSE 0 END) AS unpriced_sessions
+            SUM(CASE WHEN ${incompletePrice} THEN 1 ELSE 0 END) AS unpriced_sessions
           `;
-          // total = input + output + cache_creation + cache_read + reasoning
-          const orderBy = `(${[
-            "COALESCE(SUM(s.input_tokens), 0)",
-            "COALESCE(SUM(s.output_tokens), 0)",
-            "COALESCE(SUM(s.cache_creation_tokens), 0)",
-            "COALESCE(SUM(s.cache_read_tokens), 0)",
-            "COALESCE(SUM(s.reasoning_tokens), 0)",
-          ].join(" + ")}) DESC`;
+          const orderBy = `SUM(${tokenVolume}) DESC`;
           const pricesLoaded =
             (
               db
@@ -744,21 +874,18 @@ const topTokens = defineCommand({
           if (by === "session") {
             sql = `SELECT s.id AS session_id, s.model, s.project_path,
                           COALESCE(s.input_tokens, 0) AS input_tokens,
+                          ${billableInputTokens} AS billable_input_tokens,
                           COALESCE(s.output_tokens, 0) AS output_tokens,
+                          ${billableOutputTokens} AS billable_output_tokens,
                           COALESCE(s.cache_creation_tokens, 0) AS cache_creation_tokens,
                           COALESCE(s.cache_read_tokens, 0) AS cache_read_tokens,
                           COALESCE(s.reasoning_tokens, 0) AS reasoning_tokens,
-                          ROUND((COALESCE(s.input_tokens,0)*COALESCE(p.input_per_mtok,0)
-                                +COALESCE(s.output_tokens,0)*COALESCE(p.output_per_mtok,0)
-                                +COALESCE(s.cache_read_tokens,0)*COALESCE(p.cache_read_per_mtok,0)
-                                +COALESCE(s.cache_creation_tokens,0)*COALESCE(p.cache_write_per_mtok,0))/1e6, 4) AS cost_usd,
-                          CASE WHEN p.model IS NULL THEN 1 ELSE 0 END AS unpriced,
+                          ROUND((${pricedCost})/1e6, 4) AS cost_usd,
+                          CASE WHEN ${incompletePrice} THEN 1 ELSE 0 END AS unpriced,
                           s.started_at
                      FROM ${join}
                     WHERE ${where.join(" AND ")}
-                    ORDER BY (COALESCE(s.input_tokens,0)+COALESCE(s.output_tokens,0)
-                              +COALESCE(s.cache_creation_tokens,0)+COALESCE(s.cache_read_tokens,0)
-                              +COALESCE(s.reasoning_tokens,0)) DESC
+                    ORDER BY ${tokenVolume} DESC
                     LIMIT ?`;
           } else if (by === "day") {
             sql = `SELECT date(s.started_at, 'unixepoch') AS day,
@@ -791,6 +918,19 @@ const topTokens = defineCommand({
           }
 
           const rows = db.prepare(sql).all(...params, limit);
+          const unpricedSessions = pricesLoaded
+            ? ((
+                db
+                  .prepare(
+                    `SELECT COUNT(*) AS count
+                    FROM ${join}
+                    WHERE ${where.join(" AND ")}
+                      ${groupedValueCondition === null ? "" : `AND ${groupedValueCondition}`}
+                      AND (${incompletePrice})`,
+                  )
+                  .get(...params) as { count: number } | undefined
+              )?.count ?? 0)
+            : 0;
           return {
             data: {
               by,
@@ -800,9 +940,8 @@ const topTokens = defineCommand({
               ...(project !== null ? { project } : {}),
               ...rangeMeta(range),
             },
-            ...(pricesLoaded
-              ? {}
-              : {
+            ...(!pricesLoaded
+              ? {
                   warnings: [
                     {
                       name: "NO_PRICES_LOADED",
@@ -810,7 +949,17 @@ const topTokens = defineCommand({
                         "model_prices is empty — cost_usd is 0. Run `agentmine prices sync` first.",
                     },
                   ],
-                }),
+                }
+              : unpricedSessions > 0
+                ? {
+                    warnings: [
+                      {
+                        name: "INCOMPLETE_PRICING",
+                        message: `${unpricedSessions} session(s) use token categories without a loaded price or a verified source-overlap policy. cost_usd is a lower bound; run \`agentmine prices sync --online\`, inspect \`agentmine prices ls\`, and verify custom source semantics.`,
+                      },
+                    ],
+                  }
+                : {}),
           };
         } finally {
           db.close();

@@ -30,9 +30,11 @@ import {
 import { runCommand } from "../contract/result.js";
 import {
   CODEX_LINEAGE_BACKFILL_META_KEY,
+  CODEX_TOKEN_USAGE_BACKFILL_META_KEY,
   dbExists,
   getMeta,
   openDb,
+  parseStoredSchemaVersion,
   upsertMeta,
 } from "../db/client.js";
 import { withWriteLock } from "../db/lock.js";
@@ -226,9 +228,11 @@ export const normalizeCommand = defineCommand({
           );
         }
 
-        const codexLineageBackfill =
-          sources.some((source) => source.name === "codex") &&
-          codexLineageBackfillIsPending();
+        const codexBackfill = sources.some((source) => source.name === "codex")
+          ? codexBackfillState()
+          : { lineage: false, tokenUsage: false };
+        const codexReparseRequired =
+          codexBackfill.lineage || codexBackfill.tokenUsage;
 
         let fileSets = await Promise.all(
           sources.map(async (s) => ({
@@ -242,7 +246,7 @@ export const normalizeCommand = defineCommand({
             fileSets.map(async (fs) => ({
               source: fs.source,
               files:
-                codexLineageBackfill && fs.source.name === "codex"
+                codexReparseRequired && fs.source.name === "codex"
                   ? fs.files
                   : await filterFilesBySince(
                       fs.files,
@@ -257,7 +261,7 @@ export const normalizeCommand = defineCommand({
         if (totalFiles === 0) {
           // With a --since window, finding nothing recent is a normal no-op,
           // not an error — the corpus is simply already current.
-          if (sinceSec !== null) {
+          if (sinceSec !== null && !codexReparseRequired) {
             return {
               data: {
                 sources: sources.map((s) => s.name),
@@ -283,17 +287,26 @@ export const normalizeCommand = defineCommand({
               },
             };
           }
-          throw Errors.notFound(
-            `No input files found under any enabled source root (${sources
-              .map((s) => s.rootPath)
-              .join(", ")}). ${missingInputRecovery(sources)}`,
-          );
+          if (!codexReparseRequired) {
+            throw Errors.notFound(
+              `No input files found under any enabled source root (${sources
+                .map((s) => s.rootPath)
+                .join(", ")}). ${missingInputRecovery(sources)}`,
+            );
+          }
+          // A pending Codex migration must still open the writable database,
+          // invalidate stale usage, and report the rows that cannot be restored
+          // from the currently available mirror. Falling through also keeps the
+          // operation under the normal writer lock.
         }
 
         reportProgressImmediate("normalize.start", {
           files: totalFiles,
           sources: sources.map((s) => s.name),
-          ...(codexLineageBackfill ? { codex_lineage_backfill: true } : {}),
+          ...(codexBackfill.lineage ? { codex_lineage_backfill: true } : {}),
+          ...(codexBackfill.tokenUsage
+            ? { codex_token_usage_backfill: true }
+            : {}),
         });
 
         const redact = !args["no-redact"];
@@ -315,6 +328,8 @@ export const normalizeCommand = defineCommand({
           let skippedEmpty = 0;
           let skippedByFilter = 0;
           let failed = 0;
+          let codexFailed = 0;
+          let codexTokenUsageBackfillRemaining: number | undefined;
           let totalRedactions = 0;
           const redactionsBySource: Record<string, number> = {};
           const processedBySource: Record<string, number> = {};
@@ -333,7 +348,7 @@ export const normalizeCommand = defineCommand({
             // The Codex lineage backfill must reparse unchanged Codex files, so
             // the stat pre-filter is disabled for that source while it runs.
             const statSkipEnabled =
-              !args.force && !(codexLineageBackfill && source.name === "codex");
+              !args.force && !(codexReparseRequired && source.name === "codex");
             for (let start = 0; start < files.length; start += BATCH) {
               const batch = files.slice(start, start + BATCH);
 
@@ -389,6 +404,7 @@ export const normalizeCommand = defineCommand({
                   const st = stats.get(file) ?? null;
                   if (parseError) {
                     failed += 1;
+                    if (source.name === "codex") codexFailed += 1;
                     failures.push({
                       path: relative(source.rootPath, file),
                       error: parseError,
@@ -415,7 +431,7 @@ export const normalizeCommand = defineCommand({
                   }
                   if (
                     !args.force &&
-                    !codexLineageBackfill &&
+                    !(codexReparseRequired && source.name === "codex") &&
                     sessionIsUpToDate(db, session.id, session.contentHash)
                   ) {
                     skippedCached += 1;
@@ -445,6 +461,7 @@ export const normalizeCommand = defineCommand({
                     if (st) recordFileStat(db, file, st);
                   } catch (e) {
                     failed += 1;
+                    if (source.name === "codex") codexFailed += 1;
                     failures.push({
                       path: relative(source.rootPath, file),
                       error: (e as Error).message,
@@ -487,7 +504,7 @@ export const normalizeCommand = defineCommand({
             workflowSkipped = wf.skipped;
           }
 
-          if (codexLineageBackfill && !dryRun && failed === 0) {
+          if (codexReparseRequired && !dryRun) {
             // A failure-free all-source run can still see an incomplete Codex
             // mirror. The migration invalidates every legacy Codex hash, so
             // clear the marker only after every such row has been rewritten.
@@ -500,8 +517,16 @@ export const normalizeCommand = defineCommand({
                     WHERE source = 'codex' AND content_hash IS NULL`,
                 )
                 .get()?.count ?? 1;
-            if (pendingCodexRows === 0) {
-              upsertMeta(db, CODEX_LINEAGE_BACKFILL_META_KEY, "0");
+            if (codexBackfill.tokenUsage) {
+              codexTokenUsageBackfillRemaining = pendingCodexRows;
+            }
+            if (codexFailed === 0 && pendingCodexRows === 0) {
+              if (codexBackfill.lineage) {
+                upsertMeta(db, CODEX_LINEAGE_BACKFILL_META_KEY, "0");
+              }
+              if (codexBackfill.tokenUsage) {
+                upsertMeta(db, CODEX_TOKEN_USAGE_BACKFILL_META_KEY, "0");
+              }
             }
           }
 
@@ -545,13 +570,35 @@ export const normalizeCommand = defineCommand({
               redacted: redact,
               dry_run: dryRun,
               ...(sinceSec !== null ? { since_epoch: sinceSec } : {}),
-              ...(codexLineageBackfill ? { codex_lineage_backfill: true } : {}),
+              ...(codexBackfill.lineage
+                ? { codex_lineage_backfill: true }
+                : {}),
+              ...(codexBackfill.tokenUsage
+                ? { codex_token_usage_backfill: true }
+                : {}),
+              ...(codexTokenUsageBackfillRemaining !== undefined
+                ? {
+                    codex_token_usage_backfill_remaining:
+                      codexTokenUsageBackfillRemaining,
+                  }
+                : {}),
               db_path: getDbPath(),
               ...(projectPathAllow
                 ? { project_path_allow: projectPathAllow.raw }
                 : {}),
             },
             ...(failed > 0 ? { errors } : {}),
+            ...(codexTokenUsageBackfillRemaining !== undefined &&
+            (codexTokenUsageBackfillRemaining > 0 || codexFailed > 0)
+              ? {
+                  warnings: [
+                    {
+                      name: "CODEX_TOKEN_USAGE_BACKFILL_PENDING",
+                      message: `${codexTokenUsageBackfillRemaining} Codex session(s) still need corrected token usage and ${codexFailed} Codex file(s) failed to normalize. Restore or sync their rollout files and rerun \`agentmine normalize\`; \`top tokens\` remains unavailable until the backfill completes.`,
+                    },
+                  ],
+                }
+              : {}),
           };
         };
 
@@ -566,25 +613,27 @@ export const normalizeCommand = defineCommand({
   },
 });
 
-function codexLineageBackfillIsPending(): boolean {
+function codexBackfillState(): { lineage: boolean; tokenUsage: boolean } {
   const dbPath = getDbPath();
-  if (!dbExists(dbPath)) return false;
+  if (!dbExists(dbPath)) return { lineage: false, tokenUsage: false };
 
   const db = openDb({ readonly: true, init: false, path: dbPath });
   try {
-    const schemaVersion = Number.parseInt(
-      getMeta(db, "schema_version") ?? "0",
-      10,
+    const schemaVersion = parseStoredSchemaVersion(
+      getMeta(db, "schema_version"),
     );
-    return (
-      !Number.isSafeInteger(schemaVersion) ||
-      schemaVersion < 14 ||
-      getMeta(db, CODEX_LINEAGE_BACKFILL_META_KEY) === "1"
-    );
+    return {
+      lineage:
+        schemaVersion < 14 ||
+        getMeta(db, CODEX_LINEAGE_BACKFILL_META_KEY) === "1",
+      tokenUsage:
+        schemaVersion < 15 ||
+        getMeta(db, CODEX_TOKEN_USAGE_BACKFILL_META_KEY) === "1",
+    };
   } catch {
     // An old corpus without readable migration metadata needs the conservative
     // full Codex pass. The normal writable open will surface genuine DB errors.
-    return true;
+    return { lineage: true, tokenUsage: true };
   } finally {
     db.close();
   }
