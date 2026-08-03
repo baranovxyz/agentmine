@@ -3,6 +3,13 @@
 Notable Agentmine changes only. Keep this file short; detailed implementation notes belong in
 commit history and release notes.
 
+## 0.7.2 - 2026-08-03
+
+- Move to Agent Canonical 0.2.1 so corrected Codex fork and cache-write token accounting remains
+  available alongside the rollout-family materializer required by Arcadia.
+- Fail closed when source plans contain malformed Codex JSONL or an explicit successful spawn has
+  no authoritative child identity.
+
 ## 0.7.1 - 2026-08-02
 
 - Correct Codex fork usage and cache-cost accounting, preserve cache-write tokens, and report
