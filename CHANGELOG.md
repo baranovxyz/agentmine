@@ -3,6 +3,22 @@
 Notable Agentmine changes only. Keep this file short; detailed implementation notes belong in
 commit history and release notes.
 
+## 0.8.0 - 2026-08-04
+
+- Ingest Pi sessions from the append-only per-session JSONL store
+  (`~/.pi/agent/sessions/<cwd-slug>/`), including thinking, per-message token usage, in-place
+  branches, and tool calls correlated by tool-call ID.
+- Ingest Factory Droid sessions from the per-session JSONL plus its `<id>.settings.json` sibling
+  (`~/.factory/sessions/<cwd-slug>/`), including the model alias, session token totals, thinking,
+  and tool results correlated Anthropic-style by tool-use ID.
+- Ingest Mistral Vibe sessions from the per-session directory (`~/.vibe/logs/session/<name>/`),
+  reading `messages.jsonl` plus the `meta.json` sidecar for identity, timing, project path, git
+  branch, model, and token totals.
+- A sidecar-only rewrite now refreshes the Droid and Vibe rows it owns instead of being skipped as
+  up to date, so session token totals cannot go stale.
+- Source per-CLI transcript parsing from `agent-canonical` 0.3.0 (adds the Pi, Droid, and Vibe
+  parsers).
+
 ## 0.7.2 - 2026-08-03
 
 - Move to Agent Canonical 0.2.1 so corrected Codex fork and cache-write token accounting remains

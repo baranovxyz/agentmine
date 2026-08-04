@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { readdir, stat } from "node:fs/promises";
-import { join, relative } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { defineCommand } from "citty";
 import {
   listGooseSessionIds,
@@ -11,12 +11,15 @@ import {
   parseCodexFile,
   parseCopilotFile,
   parseCursorFile,
+  parseDroidFile,
   parseGeminiFile,
   parseGooseSessionFromDb,
   parseKiloSessionFromDb,
   parseOpencodeSession,
   parseOpencodeSessionFromDb,
+  parsePiFile,
   parseQwenFile,
+  parseVibeFile,
 } from "../adapters/canonical.js";
 import type { RedactionRule } from "../adapters/extension-types.js";
 import type { CanonicalSession } from "../adapters/types.js";
@@ -173,13 +176,47 @@ const BUILT_IN_SOURCES: SourceConfig[] = [
     listFiles: listCopilotSessions,
     parse: parseCopilotFile,
   },
+  // File-based Pi. `sync` mirrors `~/.pi/agent/sessions` into rawPi. Each
+  // session is one append-only JSONL nested a single cwd-slug directory down,
+  // and it is self-sufficient — no sibling to fold into freshness.
+  {
+    name: "pi",
+    rootPath: paths.rawPi,
+    inputMode: "synced-files",
+    listFiles: listPiSessions,
+    parse: parsePiFile,
+  },
+  // File-based Factory Droid. `sync` mirrors `~/.factory/sessions` into
+  // rawDroid. Each session is a `<uuid>.jsonl` plus a `<uuid>.settings.json`
+  // sibling carrying the model alias and token totals, so the settings file is
+  // a freshness sibling.
+  {
+    name: "droid",
+    rootPath: paths.rawDroid,
+    inputMode: "synced-files",
+    listFiles: listDroidSessions,
+    freshnessSiblings: listDroidSettingsSibling,
+    parse: parseDroidFile,
+  },
+  // File-based Mistral Vibe. `sync` mirrors `~/.vibe/logs/session` into
+  // rawVibe. Each session is a directory holding `messages.jsonl` plus a
+  // `meta.json` sidecar carrying identity, timing, model, and token totals, so
+  // the sidecar is a freshness sibling.
+  {
+    name: "vibe",
+    rootPath: paths.rawVibe,
+    inputMode: "synced-files",
+    listFiles: listVibeSessions,
+    freshnessSiblings: listVibeMetadataSibling,
+    parse: parseVibeFile,
+  },
 ];
 
 export const normalizeCommand = defineCommand({
   meta: {
     name: "normalize",
     description:
-      "Parse raw session archives (claude-code + cursor + opencode + codex + gemini + qwen + kilo + goose + cline + copilot) into the agentmine SQLite corpus",
+      "Parse raw session archives (claude-code + cursor + opencode + codex + gemini + qwen + kilo + goose + cline + copilot + pi + droid + vibe) into the agentmine SQLite corpus",
   },
   args: {
     force: {
@@ -200,7 +237,7 @@ export const normalizeCommand = defineCommand({
     source: {
       type: "string",
       description:
-        "Filter to one source: claude-code | cursor | opencode | opencode-db | codex | gemini | qwen | kilo | goose | cline | copilot",
+        "Filter to one source: claude-code | cursor | opencode | opencode-db | codex | gemini | qwen | kilo | goose | cline | copilot | pi | droid | vibe",
     },
     since: {
       type: "string",
@@ -938,6 +975,68 @@ async function listCopilotSessions(root: string): Promise<string[]> {
       if (st.isFile() && st.size > 0) out.push(eventsPath);
     } catch {
       /* no events.jsonl in this dir — skip */
+    }
+  }
+  return out.sort();
+}
+
+// ---------- Pi walker ----------
+async function listPiSessions(root: string): Promise<string[]> {
+  // Pi archive: <root>/<cwd-slug>/<ISO-timestamp>_<uuidv7>.jsonl. One
+  // append-only file per session; `--continue` reopens the same file rather
+  // than starting a new one.
+  const out: string[] = [];
+  await walkJsonl(root, out, { skipDirs: new Set() });
+  return out.sort();
+}
+
+// ---------- Droid walker ----------
+const DROID_SETTINGS_SUFFIX = ".settings.json";
+
+export function listDroidSettingsSibling(sessionPath: string): string[] {
+  if (!sessionPath.endsWith(".jsonl")) return [];
+  return [`${sessionPath.slice(0, -".jsonl".length)}${DROID_SETTINGS_SUFFIX}`];
+}
+
+async function listDroidSessions(root: string): Promise<string[]> {
+  // Droid archive: <root>/<dash-slug-cwd>/<uuid>.jsonl, with a sibling
+  // <uuid>.settings.json (plus a byte-identical .settings.json.bak). Only the
+  // conversation JSONL is an input; the parser discovers the settings sibling
+  // itself, and the shared `.jsonl` walker already skips both JSON siblings.
+  const out: string[] = [];
+  await walkJsonl(root, out, { skipDirs: new Set() });
+  return out.sort();
+}
+
+// ---------- Vibe walker ----------
+const VIBE_MESSAGES_FILENAME = "messages.jsonl";
+const VIBE_METADATA_FILENAME = "meta.json";
+/** Store-root pointer directory that holds tty→session ids, not session data. */
+const VIBE_POINTER_DIR = ".last_session";
+
+export function listVibeMetadataSibling(messagesPath: string): string[] {
+  if (!messagesPath.endsWith(VIBE_MESSAGES_FILENAME)) return [];
+  return [join(dirname(messagesPath), VIBE_METADATA_FILENAME)];
+}
+
+async function listVibeSessions(root: string): Promise<string[]> {
+  // Vibe stores each session as <root>/<prefix>_<timestamp>_<id8>/ holding
+  // messages.jsonl + meta.json. Enumerate every nonempty messages.jsonl one
+  // level down, skipping the `.last_session` pointer dir; real paths keep the
+  // --since mtime filter working.
+  const out: string[] = [];
+  const entries = await readdir(root, { withFileTypes: true }).catch(
+    () => null,
+  );
+  if (entries === null) return out;
+  for (const entry of entries) {
+    if (!entry.isDirectory() || entry.name === VIBE_POINTER_DIR) continue;
+    const messagesPath = join(root, entry.name, VIBE_MESSAGES_FILENAME);
+    try {
+      const st = await stat(messagesPath);
+      if (st.isFile() && st.size > 0) out.push(messagesPath);
+    } catch {
+      /* no messages.jsonl in this dir — skip */
     }
   }
   return out.sort();

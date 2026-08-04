@@ -58,13 +58,31 @@ const TARGETS: SyncTarget[] = [
     target: paths.rawCopilot,
     optional: true,
   },
+  {
+    name: "pi",
+    source: paths.sourcePiSessions,
+    target: paths.rawPi,
+    optional: true,
+  },
+  {
+    name: "droid",
+    source: paths.sourceDroidSessions,
+    target: paths.rawDroid,
+    optional: true,
+  },
+  {
+    name: "vibe",
+    source: paths.sourceVibeSessions,
+    target: paths.rawVibe,
+    optional: true,
+  },
 ];
 
 export const syncCommand = defineCommand({
   meta: {
     name: "sync",
     description:
-      "Rsync raw agent-session archives (claude-code, cursor, codex, gemini, qwen, cline, copilot) into the app-data sessions root",
+      "Rsync raw agent-session archives (claude-code, cursor, codex, gemini, qwen, cline, copilot, pi, droid, vibe) into the app-data sessions root",
   },
   args: {
     "dry-run": {

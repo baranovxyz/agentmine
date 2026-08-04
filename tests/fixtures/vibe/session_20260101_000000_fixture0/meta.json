@@ -1,0 +1,34 @@
+{
+  "session_id": "fixture-001",
+  "start_time": "2026-01-01T00:00:00.000000+00:00",
+  "end_time": "2026-01-01T00:00:05.000000+00:00",
+  "git_commit": "commit-placeholder",
+  "git_branch": "main",
+  "environment": {
+    "working_directory": "/home/example/sample-project"
+  },
+  "username": "user-placeholder",
+  "title": "Sample vibe session",
+  "title_source": "user",
+  "total_messages": 4,
+  "stats": {
+    "steps": 2,
+    "session_prompt_tokens": 12,
+    "session_completion_tokens": 6,
+    "session_cached_tokens": 4,
+    "session_cost": 0.0,
+    "tool_calls_agreed": 1,
+    "tool_calls_rejected": 0,
+    "tool_calls_failed": 0,
+    "tool_calls_succeeded": 1
+  },
+  "config": {
+    "active_model": "alias-placeholder",
+    "models": {
+      "alias-placeholder": {
+        "name": "model-placeholder",
+        "provider": "provider-placeholder"
+      }
+    }
+  }
+}

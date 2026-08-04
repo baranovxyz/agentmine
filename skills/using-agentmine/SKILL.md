@@ -27,7 +27,8 @@ the contract, exit codes, and command registry before you script it.
 
 ```bash
 # File-based stores — pick the source you have:
-agentmine ingest --source claude-code   # or cursor | codex | gemini | qwen | cline | copilot
+agentmine ingest --source claude-code   # or cursor | codex | gemini | qwen | cline |
+                                        # copilot | pi | droid | vibe
 
 # Live SQLite stores (OpenCode, Kilo Code, Goose):
 agentmine normalize --source opencode-db && agentmine extract

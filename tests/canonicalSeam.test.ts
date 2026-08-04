@@ -5,7 +5,13 @@
  * CanonicalSession shape.
  */
 
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -15,8 +21,11 @@ import {
   parseClineFile,
   parseCodexFile,
   parseCopilotFile,
+  parseDroidFile,
   parseGeminiFile,
+  parsePiFile,
   parseQwenFile,
+  parseVibeFile,
 } from "../src/adapters/canonical.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -38,6 +47,27 @@ const COPILOT_FIXTURE = join(
   "copilot",
   "fixture-001",
   "events.jsonl",
+);
+const PI_FIXTURE = join(
+  __dirname,
+  "fixtures",
+  "pi",
+  "fixture-project",
+  "2026-01-01T00-00-00-000Z_fixture-001.jsonl",
+);
+const DROID_FIXTURE = join(
+  __dirname,
+  "fixtures",
+  "droid",
+  "fixture-project",
+  "fixture-001.jsonl",
+);
+const VIBE_FIXTURE = join(
+  __dirname,
+  "fixtures",
+  "vibe",
+  "session_20260101_000000_fixture0",
+  "messages.jsonl",
 );
 
 describe("canonical seam — parseClaudeCodeFile (shared parser via canonical.ts)", () => {
@@ -248,5 +278,155 @@ describe("canonical seam — parseCopilotFile (shared parser via canonical.ts)",
     expect(session?.inputTokens).toBe(12);
     expect(session?.outputTokens).toBe(6);
     expect(session?.contentHash).toMatch(/^[0-9a-f]{64}$/u);
+  });
+});
+
+describe("canonical seam — parsePiFile (shared parser via canonical.ts)", () => {
+  it("flattens a Pi session JSONL with identity, metadata, and usage", async () => {
+    const session = await parsePiFile(PI_FIXTURE);
+
+    expect(session).not.toBeNull();
+    expect(session?.source).toBe("pi");
+    expect(session?.id).toBe("pi--fixture-001");
+    expect(session?.projectPath).toBe("/home/example/sample-project");
+    expect(session?.model).toBe("model-placeholder");
+    expect(session?.title).toBe("pi-fixture-session");
+    // user, split-out thinking, tool-issuing assistant, final assistant.
+    expect(session?.messages.map((message) => message.role)).toEqual([
+      "user",
+      "thinking",
+      "assistant",
+      "assistant",
+    ]);
+    // Per-assistant-message usage sums across the session.
+    expect(session?.inputTokens).toBe(32);
+    expect(session?.outputTokens).toBe(14);
+    expect(session?.contentHash).toMatch(/^[0-9a-f]{64}$/u);
+  });
+
+  it("correlates the tool result back onto its assistant tool call", async () => {
+    const session = await parsePiFile(PI_FIXTURE);
+    const toolCalls = session?.messages.flatMap((message) => message.toolCalls);
+
+    expect(toolCalls).toHaveLength(1);
+    expect(toolCalls?.[0]?.name).toBe("bash");
+    expect(toolCalls?.[0]?.callId).toBe("call_fixture_1");
+    expect(toolCalls?.[0]?.outputFull).toBe("README.md");
+  });
+});
+
+describe("canonical seam — parseDroidFile (shared parser via canonical.ts)", () => {
+  it("flattens a Droid JSONL + settings sibling with identity, metadata, and usage", async () => {
+    const session = await parseDroidFile(DROID_FIXTURE);
+
+    expect(session).not.toBeNull();
+    expect(session?.source).toBe("droid");
+    expect(session?.id).toBe("droid--fixture-001");
+    expect(session?.projectPath).toBe("/home/example/sample-project");
+    expect(session?.title).toBe("Sample droid session");
+    // The settings sibling is the only source of the model alias and totals.
+    expect(session?.model).toBe("model-placeholder");
+    expect(session?.inputTokens).toBe(12);
+    expect(session?.outputTokens).toBe(6);
+    expect(session?.cacheReadTokens).toBe(4);
+    expect(session?.cacheCreationTokens).toBe(2);
+    expect(session?.reasoningTokens).toBe(3);
+    expect(session?.messages.map((message) => message.role)).toEqual([
+      "user",
+      "thinking",
+      "assistant",
+      "assistant",
+    ]);
+    expect(session?.contentHash).toMatch(/^[0-9a-f]{64}$/u);
+  });
+
+  it("folds the settings sibling into the ingest cache key", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "agentmine-droid-sidecar-"));
+    try {
+      const sessionPath = join(dir, "fixture-001.jsonl");
+      const settingsPath = join(dir, "fixture-001.settings.json");
+      copyFileSync(DROID_FIXTURE, sessionPath);
+      copyFileSync(
+        join(dirname(DROID_FIXTURE), "fixture-001.settings.json"),
+        settingsPath,
+      );
+
+      const before = await parseDroidFile(sessionPath);
+      writeFileSync(
+        settingsPath,
+        JSON.stringify({
+          model: "model-placeholder",
+          tokenUsage: { inputTokens: 99, outputTokens: 6 },
+        }),
+      );
+      const after = await parseDroidFile(sessionPath);
+
+      // The transcript is byte-identical, so only the sidecar mixing can move
+      // the hash — without it a settings-only update would be skipped as cached.
+      expect(after?.inputTokens).toBe(99);
+      expect(after?.contentHash).not.toBe(before?.contentHash);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("canonical seam — parseVibeFile (shared parser via canonical.ts)", () => {
+  it("flattens a Vibe messages.jsonl + meta.json with identity, metadata, and usage", async () => {
+    const session = await parseVibeFile(VIBE_FIXTURE);
+
+    expect(session).not.toBeNull();
+    expect(session?.source).toBe("vibe");
+    expect(session?.id).toBe("vibe--fixture-001");
+    expect(session?.projectPath).toBe("/home/example/sample-project");
+    expect(session?.gitBranch).toBe("main");
+    expect(session?.title).toBe("Sample vibe session");
+    // The model is only recoverable through config.models[active_model].name.
+    expect(session?.model).toBe("model-placeholder");
+    expect(session?.inputTokens).toBe(12);
+    expect(session?.outputTokens).toBe(6);
+    expect(session?.cacheReadTokens).toBe(4);
+    expect(session?.messages.map((message) => message.role)).toEqual([
+      "user",
+      "thinking",
+      "assistant",
+      "assistant",
+    ]);
+    expect(session?.contentHash).toMatch(/^[0-9a-f]{64}$/u);
+  });
+
+  it("accepts the session directory as well as its messages.jsonl", async () => {
+    const fromDir = await parseVibeFile(dirname(VIBE_FIXTURE));
+    const fromFile = await parseVibeFile(VIBE_FIXTURE);
+
+    expect(fromDir?.id).toBe(fromFile?.id);
+    expect(fromDir?.contentHash).toBe(fromFile?.contentHash);
+  });
+
+  it("folds the meta.json sidecar into the ingest cache key", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "agentmine-vibe-sidecar-"));
+    try {
+      const sessionDir = join(dir, "session_20260101_000000_fixture0");
+      mkdirSync(sessionDir, { recursive: true });
+      const messagesPath = join(sessionDir, "messages.jsonl");
+      const metaPath = join(sessionDir, "meta.json");
+      copyFileSync(VIBE_FIXTURE, messagesPath);
+      copyFileSync(join(dirname(VIBE_FIXTURE), "meta.json"), metaPath);
+
+      const before = await parseVibeFile(messagesPath);
+      writeFileSync(
+        metaPath,
+        JSON.stringify({
+          session_id: "fixture-001",
+          stats: { session_prompt_tokens: 99, session_completion_tokens: 6 },
+        }),
+      );
+      const after = await parseVibeFile(messagesPath);
+
+      expect(after?.inputTokens).toBe(99);
+      expect(after?.contentHash).not.toBe(before?.contentHash);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

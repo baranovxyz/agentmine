@@ -1,0 +1,20 @@
+{
+  "model": "model-placeholder",
+  "reasoningEffort": "medium",
+  "autonomyLevel": "medium",
+  "interactionMode": "default",
+  "tokenUsage": {
+    "inputTokens": 12,
+    "outputTokens": 6,
+    "cacheReadTokens": 4,
+    "cacheCreationTokens": 2,
+    "thinkingTokens": 3
+  },
+  "inclusiveTokenUsage": {
+    "inputTokens": 12,
+    "outputTokens": 6,
+    "cacheReadTokens": 4,
+    "cacheCreationTokens": 2,
+    "thinkingTokens": 3
+  }
+}

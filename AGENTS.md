@@ -2,7 +2,7 @@
 
 Agentmine (`agentmine`) is a queryable SQLite corpus of an individual
 developer's coding-agent sessions (claude-code, codex, opencode, cursor,
-gemini, qwen, kilo, goose, cline, copilot). It ingests session transcript archives,
+gemini, qwen, kilo, goose, cline, copilot, pi, droid, vibe). It ingests session transcript archives,
 normalizes to canonical sessions/messages/tool-calls, populates fact + pattern
 tables, and exposes
 them as an agent-friendly JSON CLI.
@@ -111,7 +111,8 @@ node dist/cli.js workflow <run_id>    # one run: rollups, ordered phases, per-ag
   session change". On top of it, `file_stat_cache` records each file's
   `(mtime, size)` so an unchanged re-run skips the parse+hash entirely
   instead of parsing just to rediscover a cache hit — folding in freshness
-  siblings (Cline metadata) so a sibling-only change still re-parses.
+  siblings (Cline metadata, Droid settings, Vibe `meta.json`) so a sibling-only
+  change still re-parses.
   `--force` ignores both caches; `--dry-run` uses neither. Don't bypass
   the cache.
 - **The public dist manifest is mirror-generated.** `dist-manifest.json` exists only in the

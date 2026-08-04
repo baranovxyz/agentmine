@@ -20,7 +20,8 @@ export default {
 ```
 
 - `adapters` — additional source adapters beyond the built-in Claude Code, Cursor, Codex, Gemini
-  CLI, Qwen Code, Cline, GitHub Copilot CLI, Kilo Code, Goose, and OpenCode ones.
+  CLI, Qwen Code, Cline, GitHub Copilot CLI, Pi, Factory Droid, Mistral Vibe, Kilo Code, Goose, and
+  OpenCode ones.
 - `redactPatterns` — extra redaction rules applied alongside the built-in secret patterns.
 
 ## Keep it private

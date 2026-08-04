@@ -1,0 +1,4 @@
+{"role": "user", "content": "List the files here.", "injected": false, "message_id": "msg_fixture_1"}
+{"role": "assistant", "reasoning_content": "Check the directory.", "reasoning_message_id": "msg_fixture_2r", "message_id": "msg_fixture_2", "tool_calls": [{"id": "call_fixture_1", "index": 0, "type": "function", "function": {"name": "bash", "arguments": "{\"command\": \"ls\"}"}}]}
+{"role": "tool", "content": "README.md", "name": "bash", "tool_call_id": "call_fixture_1", "tool_result": {"output": {"command": "ls", "stdout": "README.md", "stderr": "", "returncode": 0}, "duration": 0.01, "cancelled": false}}
+{"role": "assistant", "content": "There is one file: README.md.", "message_id": "msg_fixture_3"}
