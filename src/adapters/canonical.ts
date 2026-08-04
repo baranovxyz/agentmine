@@ -22,6 +22,7 @@ import {
   type CursorParseOptions,
   parseSessionFile as parseCursorSessionFile,
 } from "agent-canonical/parsers/cursor";
+import { parseSessionFile as parseDroidSessionFile } from "agent-canonical/parsers/droid";
 import { parseSessionFile as parseGeminiSessionFile } from "agent-canonical/parsers/gemini";
 import {
   type GooseDb,
@@ -40,7 +41,9 @@ import {
   parseSessionFile as parseOpencodeSessionFile,
   parseSessionFromDb,
 } from "agent-canonical/parsers/opencode";
+import { parseSessionFile as parsePiSessionFile } from "agent-canonical/parsers/pi";
 import { parseSessionFile as parseQwenSessionFile } from "agent-canonical/parsers/qwen";
+import { parseSessionFile as parseVibeSessionFile } from "agent-canonical/parsers/vibe";
 import type { Session } from "agent-canonical/schemas";
 import { type CanonicalSession, SessionSchema } from "./types.js";
 
@@ -295,4 +298,100 @@ export async function parseCopilotFile(
   const result = await parseCopilotSessionFile(filePath);
   if (!result.success) return null;
   return flattenSession(result.data);
+}
+
+/**
+ * Pi writes one append-only JSONL per session at
+ * `~/.pi/agent/sessions/<cwd-slug>/<ISO-timestamp>_<uuidv7>.jsonl`; `filePath`
+ * is that file. Like Copilot it is self-sufficient — every session-level fact
+ * lives on a line of the same file — so the flattened session needs no extra
+ * cache-key mixing. The shared parser stamps `cli:"pi"`, so the flattened
+ * source is already "pi" — no override needed.
+ */
+export async function parsePiFile(
+  filePath: string,
+): Promise<CanonicalSession | null> {
+  const result = await parsePiSessionFile(filePath);
+  if (!result.success) return null;
+  return flattenSession(result.data);
+}
+
+/**
+ * Factory Droid writes each session as `<uuid>.jsonl` plus a sibling
+ * `<uuid>.settings.json` under `~/.factory/sessions/<cwd-slug>/`; `filePath` is
+ * the JSONL and the parser discovers the settings file itself. The settings
+ * sibling is the only source of the model alias and the session token totals,
+ * so it joins the effective ingest hash (see `mixSidecarIntoCacheKey`). The
+ * shared parser stamps `cli:"droid"`, so the flattened source is already
+ * "droid" — no override needed.
+ */
+export async function parseDroidFile(
+  filePath: string,
+): Promise<CanonicalSession | null> {
+  const result = await parseDroidSessionFile(filePath);
+  if (!result.success) return null;
+  return mixSidecarIntoCacheKey(
+    flattenSession(result.data),
+    "agentmine:droid-settings:v1",
+  );
+}
+
+/**
+ * Mistral Vibe writes each session as a directory under `~/.vibe/logs/session/`
+ * holding `messages.jsonl` and a `meta.json` sidecar; `filePath` is the
+ * `messages.jsonl` (the parser also accepts the directory). `meta.json` is the
+ * only source of identity, timing, project path, model, and token totals, so it
+ * joins the effective ingest hash (see `mixSidecarIntoCacheKey`). The shared
+ * parser stamps `cli:"vibe"`, so the flattened source is already "vibe" — no
+ * override needed.
+ */
+export async function parseVibeFile(
+  filePath: string,
+): Promise<CanonicalSession | null> {
+  const result = await parseVibeSessionFile(filePath);
+  if (!result.success) return null;
+  return mixSidecarIntoCacheKey(
+    flattenSession(result.data),
+    "agentmine:vibe-meta:v1",
+  );
+}
+
+/**
+ * Fold a session's sidecar-derived facts into its ingest cache key.
+ *
+ * agent-canonical hashes the normalized transcript only, which is the right
+ * identity for a transcript. Droid and Vibe, though, keep session-level facts
+ * (model, token totals, timing, title) in a sibling file that is rewritten
+ * after the transcript — and unlike Cline's metadata, neither parser emits that
+ * sibling as a raw event, so there is no raw blob to mix. Hashing the
+ * sidecar-derived fields off the already-parsed session keeps the shared parser
+ * authoritative, needs no second read, and stops a sidecar-only update from
+ * being skipped as "up to date" with stale usage.
+ */
+function mixSidecarIntoCacheKey(
+  session: CanonicalSession,
+  domain: string,
+): CanonicalSession {
+  const sidecarFacts = JSON.stringify([
+    session.model ?? null,
+    session.title ?? null,
+    session.projectPath ?? null,
+    session.gitBranch ?? null,
+    session.parentSessionId ?? null,
+    session.status ?? null,
+    session.startedAt ?? null,
+    session.endedAt ?? null,
+    session.inputTokens ?? null,
+    session.outputTokens ?? null,
+    session.cacheReadTokens ?? null,
+    session.cacheCreationTokens ?? null,
+    session.reasoningTokens ?? null,
+  ]);
+  const contentHash = createHash("sha256")
+    .update(`${domain}\0`)
+    .update(session.contentHash)
+    .update("\0")
+    .update(sidecarFacts)
+    .digest("hex");
+  return { ...session, contentHash };
 }

@@ -150,6 +150,9 @@ export const paths = {
   rawQwen: join(SESSIONS_ROOT, "qwen"),
   rawCline: join(SESSIONS_ROOT, "cline"),
   rawCopilot: join(SESSIONS_ROOT, "copilot"),
+  rawPi: join(SESSIONS_ROOT, "pi"),
+  rawDroid: join(SESSIONS_ROOT, "droid"),
+  rawVibe: join(SESSIONS_ROOT, "vibe"),
   normalized: join(SESSIONS_ROOT, "normalized"),
   transcripts: join(SESSIONS_ROOT, "transcripts"),
   summaries: join(SESSIONS_ROOT, "summaries"),
@@ -178,6 +181,12 @@ export const paths = {
   sourceClineSessions: resolveClineSessionsPath({ home: HOME }),
   /** Source-of-truth GitHub Copilot CLI per-session event stream (`~/.copilot/session-state/<uuid>/events.jsonl`) */
   sourceCopilotSessions: join(HOME, ".copilot", "session-state"),
+  /** Source-of-truth Pi append-only session JSONL (`~/.pi/agent/sessions/<cwd-slug>/<ts>_<id>.jsonl`) */
+  sourcePiSessions: join(HOME, ".pi", "agent", "sessions"),
+  /** Source-of-truth Factory Droid session JSONL + settings sibling (`~/.factory/sessions/<cwd-slug>/<uuid>.jsonl`) */
+  sourceDroidSessions: join(HOME, ".factory", "sessions"),
+  /** Source-of-truth Mistral Vibe per-session directory (`~/.vibe/logs/session/<name>/messages.jsonl`) */
+  sourceVibeSessions: join(HOME, ".vibe", "logs", "session"),
 } as const;
 
 export const envKeys = {

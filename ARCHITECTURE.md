@@ -19,6 +19,9 @@ folder "Source directories" {
   [~/.qwen/projects/] as qwen
   [~/.cline/data/sessions/] as cline
   [~/.copilot/session-state/] as copilot
+  [~/.pi/agent/sessions/] as pi
+  [~/.factory/sessions/] as droid
+  [~/.vibe/logs/session/] as vibe
   [<sessions>/opencode/\nlegacy session archive] as opencodeFiles
   [~/.local/share/opencode/opencode.db] as opencodeDb
   [~/.local/share/kilo/kilo.db] as kiloDb
@@ -47,6 +50,9 @@ gemini --> sharedParsers : sync + parse
 qwen --> sharedParsers : sync + parse
 cline --> sharedParsers : sync + parse
 copilot --> sharedParsers : sync + parse
+pi --> sharedParsers : sync + parse
+droid --> sharedParsers : sync + parse
+vibe --> sharedParsers : sync + parse
 opencodeFiles --> sharedParsers : parse
 opencodeDb --> sharedParsers : direct read
 kiloDb --> sharedParsers : direct read
@@ -259,6 +265,33 @@ GitHub Copilot CLI specific:
   splits `reasoningText` into thinking. Per-message usage is output-only, so transcript totals come
   from the `session.shutdown` aggregate. `normalize --source copilot` reads the mirrored
   `events.jsonl` files.
+
+Pi specific:
+
+- `sync` mirrors `~/.pi/agent/sessions/` into `<sessions>/pi/`. Each session is one append-only
+  JSONL file, nested a single cwd-slug directory down; `--continue` reopens the same file instead
+  of starting a new one, so a session's whole history — including in-place branches — lives there.
+- The shared parser walks the entry DAG in file order, splits thinking blocks into their own
+  messages, correlates each tool call with its later `toolResult` by `toolCallId`, and sums
+  per-message usage. `normalize --source pi` reads the mirrored JSONL files.
+
+Factory Droid specific:
+
+- `sync` mirrors `~/.factory/sessions/` into `<sessions>/droid/`. Each session is a `<id>.jsonl`
+  conversation plus a `<id>.settings.json` sibling; a byte-identical `.settings.json.bak` sits
+  beside it. Only the JSONL is walked — the parser discovers the settings file itself.
+- The settings sibling is the only source of the model alias and the session token totals, so it is
+  a freshness sibling and joins the ingest cache key; a settings-only rewrite still refreshes the
+  row. `normalize --source droid` reads the mirrored JSONL files.
+
+Mistral Vibe specific:
+
+- `sync` mirrors `~/.vibe/logs/session/` into `<sessions>/vibe/`. Each session is a directory
+  holding `messages.jsonl` (one raw chat-completions message per line) and a `meta.json` sidecar;
+  the `.last_session` pointer directory holds no session content and is skipped.
+- `meta.json` is the only source of identity, timing, project path, git branch, model, and token
+  totals, so it is a freshness sibling and joins the ingest cache key. `normalize --source vibe`
+  reads the mirrored `messages.jsonl` files.
 
 Kilo Code specific:
 

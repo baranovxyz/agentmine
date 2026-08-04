@@ -6,8 +6,9 @@ import type { CanonicalSession } from "./types.js";
  * Load via `~/.config/agentmine/extensions.js`.
  *
  * Built-in source names: "claude-code", "cursor", "opencode", "opencode-db",
- * "codex", "gemini", "qwen", "kilo", "goose", "cline". Extension adapters
- * may use any agent-CLI session source name not in the built-in list.
+ * "codex", "gemini", "qwen", "kilo", "goose", "cline", "copilot", "pi",
+ * "droid", "vibe". Extension adapters may use any agent-CLI session source
+ * name not in the built-in list.
  */
 
 export interface AdapterRegistration {

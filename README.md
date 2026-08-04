@@ -6,8 +6,9 @@ can resume prior work, recall how you solved something before, and reconstruct
 what a past session did.
 
 It ingests session transcripts from tools such as Claude Code, Cursor, Codex, Gemini CLI, Qwen
-Code, Kilo Code, Goose, Cline, GitHub Copilot CLI, and OpenCode, normalizes them into a shared
-schema, extracts useful facts, and exposes the result through an agent-friendly JSON CLI.
+Code, Kilo Code, Goose, Cline, GitHub Copilot CLI, Pi, Factory Droid, Mistral Vibe, and OpenCode,
+normalizes them into a shared schema, extracts useful facts, and exposes the result through an
+agent-friendly JSON CLI.
 
 Use it to answer questions like:
 
@@ -97,13 +98,17 @@ pnpm build:standalone -- \
 Choose the source you have installed:
 
 ```bash
-# Claude Code, Cursor, Codex, Gemini CLI, Qwen Code, or Cline (pick one)
+# Claude Code, Cursor, Codex, Gemini CLI, Qwen Code, Cline, Pi, Factory Droid,
+# or Mistral Vibe (pick one)
 agentmine ingest --source claude-code
 agentmine ingest --source cursor
 agentmine ingest --source codex
 agentmine ingest --source gemini
 agentmine ingest --source qwen
 agentmine ingest --source cline
+agentmine ingest --source pi
+agentmine ingest --source droid
+agentmine ingest --source vibe
 
 # Current OpenCode SQLite store
 agentmine normalize --source opencode-db
@@ -120,14 +125,15 @@ agentmine extract
 agentmine stats
 ```
 
-Run only one of the six source-specific `ingest` examples. An unfiltered `agentmine ingest` imports
+Run only one of the nine source-specific `ingest` examples. An unfiltered `agentmine ingest` imports
 every mirrored source and directly reads available OpenCode, Kilo Code, and Goose databases during
 `normalize`, but expects the default Claude Code transcript directory to exist. For one live-DB
 source, use its `normalize --source ...` command plus `extract` as shown above.
 
 For Cline, the source directory follows Cline's own override precedence:
 `CLINE_SESSION_DATA_DIR`, then `CLINE_DATA_DIR/sessions`, then `CLINE_DIR/data/sessions`, then
-`~/.cline/data/sessions`.
+`~/.cline/data/sessions`. Pi reads `~/.pi/agent/sessions`, Factory Droid reads
+`~/.factory/sessions`, and Mistral Vibe reads `~/.vibe/logs/session`.
 
 After the first import creates `sessions.db`, run `agentmine backup` before forced rebuilds or
 other destructive maintenance.

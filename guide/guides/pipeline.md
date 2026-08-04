@@ -17,7 +17,7 @@ stage has a narrow, well-defined job, and the sequence is designed to be safe to
 Run all three file-based ingest stages for one installed CLI with:
 
 ```bash
-agentmine ingest --source claude-code # or cursor, codex, gemini, qwen, or cline
+agentmine ingest --source claude-code # or cursor, codex, gemini, qwen, cline, pi, droid, vibe
 ```
 
 An unfiltered `agentmine ingest` expects the default Claude Code transcript directory to exist.

@@ -1943,3 +1943,300 @@ describe("cli envelope", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 });
+
+/**
+ * One ingest workflow per file-backed next-CLI source: build a synthetic store
+ * under a temp HOME, run the real `ingest` (sync → normalize → extract), and
+ * assert the mirror, sessions, messages, and tool calls all land.
+ */
+describe("next-CLI ingest workflows", () => {
+  interface MirroredSession {
+    id: string;
+    source: string;
+    project_path: string | null;
+    model: string | null;
+    input_tokens: number | null;
+    output_tokens: number | null;
+  }
+
+  /** Re-run `normalize` for one source and report the files its walker saw. */
+  async function countNormalizedFiles(
+    dbPath: string,
+    dataRoot: string,
+    home: string,
+    source: string,
+  ): Promise<number> {
+    const { stdout } = await runCli(["normalize", "--source", source], {
+      HOME: home,
+      XDG_DATA_HOME: dataRoot,
+      AGENTMINE_DB: dbPath,
+    });
+    return z
+      .object({ data: z.object({ files_scanned: z.number() }).passthrough() })
+      .parse(JSON.parse(stdout.trim())).data.files_scanned;
+  }
+
+  function readIngested(dbPath: string, source: string) {
+    const db = openDb({ readonly: true, init: false, path: dbPath });
+    try {
+      const sessions = db
+        .prepare<[string], MirroredSession>(
+          `SELECT id, source, project_path, model, input_tokens, output_tokens
+             FROM sessions WHERE source = ? ORDER BY id`,
+        )
+        .all(source);
+      const messages = db
+        .prepare<[string], { turn: number; role: string; text: string | null }>(
+          `SELECT turn, role, text FROM messages
+            WHERE session_id IN (SELECT id FROM sessions WHERE source = ?)
+            ORDER BY turn`,
+        )
+        .all(source);
+      const toolCalls = db
+        .prepare<
+          [string],
+          {
+            name: string;
+            call_id: string | null;
+            output_preview: string | null;
+          }
+        >(
+          `SELECT name, call_id, output_preview FROM tool_calls
+            WHERE session_id IN (SELECT id FROM sessions WHERE source = ?)
+            ORDER BY turn, idx`,
+        )
+        .all(source);
+      return { sessions, messages, toolCalls };
+    } finally {
+      db.close();
+    }
+  }
+
+  it("ingests a Pi session JSONL from ~/.pi/agent/sessions", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "agentmine-pi-ingest-"));
+    const home = join(dir, "home");
+    const dataRoot = join(dir, "data");
+    const dbPath = join(dir, "sessions.db");
+    const sessionFile = "2026-01-01T00-00-00-000Z_fixture-001.jsonl";
+
+    try {
+      const storeDir = join(
+        home,
+        ".pi",
+        "agent",
+        "sessions",
+        "--home-example-sample-project--",
+      );
+      mkdirSync(storeDir, { recursive: true });
+      copyFileSync(
+        join(__dirname, "fixtures", "pi", "fixture-project", sessionFile),
+        join(storeDir, sessionFile),
+      );
+
+      const { exitCode } = await runCli(["ingest", "--source", "pi"], {
+        HOME: home,
+        XDG_DATA_HOME: dataRoot,
+        AGENTMINE_DB: dbPath,
+      });
+      expect(exitCode).toBe(0);
+      expect(
+        existsSync(
+          join(
+            dataRoot,
+            "agentmine",
+            "sessions",
+            "pi",
+            "--home-example-sample-project--",
+            sessionFile,
+          ),
+        ),
+      ).toBe(true);
+
+      const { sessions, messages, toolCalls } = readIngested(dbPath, "pi");
+      expect(sessions).toEqual([
+        {
+          id: "pi--fixture-001",
+          source: "pi",
+          project_path: "/home/example/sample-project",
+          model: "model-placeholder",
+          input_tokens: 32,
+          output_tokens: 14,
+        },
+      ]);
+      expect(messages.map((message) => message.role)).toEqual([
+        "user",
+        "thinking",
+        "assistant",
+        "assistant",
+      ]);
+      expect(toolCalls).toEqual([
+        {
+          name: "bash",
+          call_id: "call_fixture_1",
+          output_preview: "README.md",
+        },
+      ]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it("ingests a Droid session JSONL plus its settings sibling from ~/.factory/sessions", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "agentmine-droid-ingest-"));
+    const home = join(dir, "home");
+    const dataRoot = join(dir, "data");
+    const dbPath = join(dir, "sessions.db");
+    const fixtureDir = join(__dirname, "fixtures", "droid", "fixture-project");
+
+    try {
+      const storeDir = join(
+        home,
+        ".factory",
+        "sessions",
+        "-home-example-sample-project",
+      );
+      mkdirSync(storeDir, { recursive: true });
+      for (const name of ["fixture-001.jsonl", "fixture-001.settings.json"]) {
+        copyFileSync(join(fixtureDir, name), join(storeDir, name));
+      }
+      // Droid keeps a byte-identical settings backup beside the session; it
+      // must never be walked as an input of its own.
+      copyFileSync(
+        join(fixtureDir, "fixture-001.settings.json"),
+        join(storeDir, "fixture-001.settings.json.bak"),
+      );
+
+      const { exitCode } = await runCli(["ingest", "--source", "droid"], {
+        HOME: home,
+        XDG_DATA_HOME: dataRoot,
+        AGENTMINE_DB: dbPath,
+      });
+      expect(exitCode).toBe(0);
+      // The JSONL is the only input; settings + .bak are siblings, not files.
+      expect(await countNormalizedFiles(dbPath, dataRoot, home, "droid")).toBe(
+        1,
+      );
+
+      const { sessions, messages, toolCalls } = readIngested(dbPath, "droid");
+      expect(sessions).toEqual([
+        {
+          id: "droid--fixture-001",
+          source: "droid",
+          project_path: "/home/example/sample-project",
+          // Model + totals exist only in the settings sibling.
+          model: "model-placeholder",
+          input_tokens: 12,
+          output_tokens: 6,
+        },
+      ]);
+      expect(messages.map((message) => message.role)).toEqual([
+        "user",
+        "thinking",
+        "assistant",
+        "assistant",
+      ]);
+      expect(toolCalls).toEqual([
+        {
+          name: "bash",
+          call_id: "call_fixture_1",
+          output_preview: "README.md",
+        },
+      ]);
+
+      // A settings-only rewrite must refresh the row: the transcript is
+      // unchanged, so only the freshness sibling + cache-key mixing can carry
+      // the new totals through.
+      writeFileSync(
+        join(storeDir, "fixture-001.settings.json"),
+        JSON.stringify({
+          model: "model-placeholder",
+          tokenUsage: { inputTokens: 40, outputTokens: 20 },
+        }),
+      );
+      const refreshed = await runCli(["ingest", "--source", "droid"], {
+        HOME: home,
+        XDG_DATA_HOME: dataRoot,
+        AGENTMINE_DB: dbPath,
+      });
+      expect(refreshed.exitCode).toBe(0);
+      expect(readIngested(dbPath, "droid").sessions[0]).toMatchObject({
+        input_tokens: 40,
+        output_tokens: 20,
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 45_000);
+
+  it("ingests a Vibe session directory from ~/.vibe/logs/session", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "agentmine-vibe-ingest-"));
+    const home = join(dir, "home");
+    const dataRoot = join(dir, "data");
+    const dbPath = join(dir, "sessions.db");
+    const sessionName = "session_20260101_000000_fixture0";
+    const fixtureDir = join(__dirname, "fixtures", "vibe", sessionName);
+
+    try {
+      const storeRoot = join(home, ".vibe", "logs", "session");
+      const storeDir = join(storeRoot, sessionName);
+      mkdirSync(storeDir, { recursive: true });
+      for (const name of ["messages.jsonl", "meta.json"]) {
+        copyFileSync(join(fixtureDir, name), join(storeDir, name));
+      }
+      // The store root also holds a tty→session pointer dir with no transcript.
+      mkdirSync(join(storeRoot, ".last_session"), { recursive: true });
+      writeFileSync(join(storeRoot, ".last_session", "0"), "fixture-001");
+
+      const { exitCode } = await runCli(["ingest", "--source", "vibe"], {
+        HOME: home,
+        XDG_DATA_HOME: dataRoot,
+        AGENTMINE_DB: dbPath,
+      });
+      expect(exitCode).toBe(0);
+      // Only the session directory is an input; `.last_session` is skipped.
+      expect(await countNormalizedFiles(dbPath, dataRoot, home, "vibe")).toBe(
+        1,
+      );
+      expect(
+        existsSync(
+          join(
+            dataRoot,
+            "agentmine",
+            "sessions",
+            "vibe",
+            sessionName,
+            "meta.json",
+          ),
+        ),
+      ).toBe(true);
+
+      const { sessions, messages, toolCalls } = readIngested(dbPath, "vibe");
+      expect(sessions).toEqual([
+        {
+          id: "vibe--fixture-001",
+          source: "vibe",
+          project_path: "/home/example/sample-project",
+          // Model + totals exist only in the meta.json sidecar.
+          model: "model-placeholder",
+          input_tokens: 12,
+          output_tokens: 6,
+        },
+      ]);
+      expect(messages.map((message) => message.role)).toEqual([
+        "user",
+        "thinking",
+        "assistant",
+        "assistant",
+      ]);
+      expect(toolCalls).toEqual([
+        {
+          name: "bash",
+          call_id: "call_fixture_1",
+          output_preview: "README.md",
+        },
+      ]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
+});

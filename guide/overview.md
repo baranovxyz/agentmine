@@ -8,8 +8,9 @@ transcript archives into a searchable SQLite corpus, so you â€” or your agent â€
 work, recall how you solved something before, and reconstruct what a past session did.
 
 It ingests session transcripts from tools such as Claude Code, Cursor, Codex, Gemini CLI, Qwen
-Code, Cline, GitHub Copilot CLI, Kilo Code, Goose, and OpenCode, normalizes them into a shared
-schema, extracts useful facts, and exposes the result through an agent-friendly JSON CLI.
+Code, Cline, GitHub Copilot CLI, Pi, Factory Droid, Mistral Vibe, Kilo Code, Goose, and OpenCode,
+normalizes them into a shared schema, extracts useful facts, and exposes the result through an
+agent-friendly JSON CLI.
 
 ## Answer questions like
 

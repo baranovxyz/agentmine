@@ -27,6 +27,9 @@ Default paths live under Agentmine's user data directory:
 | `<sessions>/qwen/` | mirrored Qwen Code transcripts from `~/.qwen/projects/` |
 | `<sessions>/cline/` | mirrored Cline session JSON from Cline's resolved sessions directory |
 | `<sessions>/copilot/` | mirrored GitHub Copilot CLI event streams from `~/.copilot/session-state/` |
+| `<sessions>/pi/` | mirrored Pi session JSONL from `~/.pi/agent/sessions/` |
+| `<sessions>/droid/` | mirrored Factory Droid session JSONL + settings siblings from `~/.factory/sessions/` |
+| `<sessions>/vibe/` | mirrored Mistral Vibe session directories from `~/.vibe/logs/session/` |
 | `<sessions>/opencode/` | legacy file-based opencode archives, when present |
 | `<sessions>/sessions.db` | SQLite corpus |
 | `<sessions>/backups/` | backup archives |
@@ -55,6 +58,14 @@ Agentmine follows Cline's own session-directory override precedence:
 
 Empty override values are ignored. Relative non-empty values are preserved, matching Cline; use
 absolute paths when running Agentmine from a different working directory.
+
+Pi, Factory Droid, and Mistral Vibe have fixed store locations and no path overrides:
+
+- Pi: `~/.pi/agent/sessions/<cwd-slug>/<timestamp>_<id>.jsonl`, one append-only file per session.
+- Factory Droid: `~/.factory/sessions/<cwd-slug>/<id>.jsonl`, with a `<id>.settings.json` sibling
+  that carries the model alias and the session token totals.
+- Mistral Vibe: `~/.vibe/logs/session/<name>/`, a directory per session holding `messages.jsonl`
+  and a `meta.json` sidecar. The `.last_session` pointer directory is not a session.
 
 ## Cursor metadata caveat
 
