@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { CanonicalSession } from "../src/adapters/types.js";
 import { openDb } from "../src/db/client.js";
-import { upsertSession } from "../src/db/writer.js";
+import { upsertSessionWithPayload } from "../src/db/writer.js";
 
 // Round-trip proof: per-message token usage is persisted
 // during ingest (not only summed into the session total), so a skill span can
@@ -38,7 +38,7 @@ describe("per-message token usage persistence", () => {
     const dbPath = tmpDbPath();
     dbPaths.push(dbPath);
     const db = openDb({ path: dbPath });
-    upsertSession(db, session);
+    upsertSessionWithPayload(db, session);
     const rows = db
       .prepare<[string], UsageRow>(
         `SELECT turn, role, input_tokens, output_tokens, cache_read_tokens,

@@ -11,11 +11,17 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import { execa } from "execa";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import { parseCodexFile } from "../src/adapters/canonical.js";
+import {
+  archiveAlias,
+  archivePath,
+  attachArchive,
+} from "../src/db/archives.js";
 import {
   CODEX_LINEAGE_BACKFILL_META_KEY,
   CODEX_TOKEN_USAGE_BACKFILL_META_KEY,
@@ -23,8 +29,10 @@ import {
   openDb,
   upsertMeta,
 } from "../src/db/client.js";
+import { readFreshnessSnapshot } from "../src/db/freshness.js";
 import { acquireWriteLock } from "../src/db/lock.js";
-import { recordFileStat, upsertSession } from "../src/db/writer.js";
+import { decodePayload } from "../src/db/payloadCodec.js";
+import { recordFileStat, upsertSessionWithPayload } from "../src/db/writer.js";
 import { runAllExtractors } from "../src/extract/index.js";
 import { VERSION } from "../src/version.js";
 
@@ -372,9 +380,12 @@ describe("cli envelope", () => {
           "SELECT content_hash, model, project_path, title FROM sessions WHERE id = ?",
         )
         .get("cline--fixture-001");
+      // Verbatim events live in the sibling archive now.
+      attachArchive(afterDb, "raw");
       const rawMetadata = afterDb
-        .prepare<[string], { raw_json: string }>(
-          "SELECT raw_json FROM raw_events WHERE session_id = ? AND event_type = 'session'",
+        .prepare<[string], { payload: Uint8Array }>(
+          `SELECT payload FROM ${archiveAlias("raw")}.raw_events
+            WHERE session_id = ? AND event_type = 'session'`,
         )
         .get("cline--fixture-001");
       afterDb.close();
@@ -385,7 +396,9 @@ describe("cli envelope", () => {
         title: "Summarize the updated sample project.",
       });
       expect(after?.content_hash).not.toBe(before?.content_hash);
-      expect(rawMetadata?.raw_json).toContain("updated-model-placeholder");
+      expect(
+        rawMetadata ? decodePayload(rawMetadata.payload) : undefined,
+      ).toContain("updated-model-placeholder");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -427,25 +440,55 @@ describe("cli envelope", () => {
       const dbPath = join(dir, "sessions.db");
       const db = openDb({ path: dbPath });
       try {
-        upsertSession(db, {
+        upsertSessionWithPayload(db, {
           id: "cc--keep",
           source: "claude-code",
           projectPath: "/repo/allowed-project/app",
           title: "Keep me",
           startedAt: 1_700_000_000,
-          messages: [{ turn: 1, role: "user", text: "keep", toolCalls: [] }],
+          messages: [
+            {
+              turn: 1,
+              role: "user",
+              text: "keep",
+              toolCalls: [
+                {
+                  name: "Read",
+                  argsHash: "keep",
+                  argsPreview: "keep",
+                  outputFull: "retained private output",
+                },
+              ],
+            },
+          ],
+          rawEvents: [{ seq: 1, rawJson: '{"private":"keep"}' }],
           contentHash: randomUUID(),
         });
-        upsertSession(db, {
+        upsertSessionWithPayload(db, {
           id: "cc--drop",
           source: "claude-code",
           projectPath: "/repo/unrelated/app",
           title: "Drop me",
           startedAt: 1_700_000_001,
-          messages: [{ turn: 1, role: "user", text: "drop", toolCalls: [] }],
+          messages: [
+            {
+              turn: 1,
+              role: "user",
+              text: "drop",
+              toolCalls: [
+                {
+                  name: "Read",
+                  argsHash: "drop",
+                  argsPreview: "drop",
+                  outputFull: "purged private output",
+                },
+              ],
+            },
+          ],
+          rawEvents: [{ seq: 1, rawJson: '{"private":"drop"}' }],
           contentHash: randomUUID(),
         });
-        upsertSession(db, {
+        upsertSessionWithPayload(db, {
           id: "cc--null-path",
           source: "claude-code",
           title: "Drop null project path",
@@ -458,6 +501,23 @@ describe("cli envelope", () => {
       } finally {
         db.close();
       }
+
+      const seeded = openDb({ path: dbPath, init: false });
+      seeded
+        .prepare(
+          `INSERT INTO tool_call_ngrams
+             (sequence, n, count, sessions, example_session_id, example_start_turn)
+           VALUES ('Read → Read', 2, 1, 1, 'cc--drop', 1)`,
+        )
+        .run();
+      seeded
+        .prepare(
+          `INSERT INTO prompt_templates
+             (hash, template, count, example_session_ids)
+           VALUES ('drop-template', 'sensitive purged prompt', 1, '["cc--drop"]')`,
+        )
+        .run();
+      seeded.close();
 
       const dryRun = await runCli(
         ["purge", "--project-path-allow", "allowed-project"],
@@ -503,6 +563,38 @@ describe("cli envelope", () => {
           )
           .get();
         expect(messages?.count).toBe(1);
+        const dirty = check
+          .prepare<[], { count: number }>(
+            "SELECT count(*) AS count FROM dirty_sessions",
+          )
+          .get();
+        expect(dirty?.count).toBe(1);
+        expect(readFreshnessSnapshot(check).pending_extraction_sessions).toBe(
+          1,
+        );
+
+        attachArchive(check, "raw", { dbPath });
+        attachArchive(check, "tools", { dbPath });
+        const rawIds = check
+          .prepare<[], { session_id: string }>(
+            `SELECT DISTINCT session_id FROM ${archiveAlias("raw")}.raw_events
+              ORDER BY session_id`,
+          )
+          .all();
+        const toolIds = check
+          .prepare<[], { session_id: string }>(
+            `SELECT DISTINCT session_id FROM ${archiveAlias("tools")}.tool_outputs
+              ORDER BY session_id`,
+          )
+          .all();
+        expect(rawIds.map((row) => row.session_id)).toEqual(["cc--keep"]);
+        expect(toolIds.map((row) => row.session_id)).toEqual(["cc--keep"]);
+        expect(
+          check.prepare("SELECT COUNT(*) AS count FROM tool_call_ngrams").get(),
+        ).toEqual({ count: 0 });
+        expect(
+          check.prepare("SELECT COUNT(*) AS count FROM prompt_templates").get(),
+        ).toEqual({ count: 0 });
       } finally {
         check.close();
         rmSync(dir, { recursive: true, force: true });
@@ -512,7 +604,7 @@ describe("cli envelope", () => {
   );
 
   it(
-    "backs up sessions.db to a tar.gz archive with an integrity-checked SQLite snapshot",
+    "backs up the split corpus with integrity-checked SQLite snapshots",
     async () => {
       const dir = mkdtempSync(join(tmpdir(), "agentmine-backup-"));
       const dbPath = join(dir, "sessions.db");
@@ -522,15 +614,28 @@ describe("cli envelope", () => {
 
       const db = openDb({ path: dbPath });
       try {
-        upsertSession(db, {
+        upsertSessionWithPayload(db, {
           id: "cc--backup-me",
           source: "claude-code",
           projectPath: "/repo/app",
           title: "Backup me",
           startedAt: 1_700_000_000,
           messages: [
-            { turn: 1, role: "user", text: "keep this session", toolCalls: [] },
+            {
+              turn: 1,
+              role: "user",
+              text: "keep this session",
+              toolCalls: [
+                {
+                  name: "Read",
+                  argsHash: "backup",
+                  argsPreview: "backup",
+                  outputFull: "full output to back up",
+                },
+              ],
+            },
           ],
+          rawEvents: [{ seq: 1, rawJson: '{"backup":true}' }],
           contentHash: randomUUID(),
         });
       } finally {
@@ -549,7 +654,12 @@ describe("cli envelope", () => {
       expect(parsed.data.archive_path).toBe(archivePath);
       expect(parsed.data.db_path).toBe(dbPath);
       expect(parsed.data.integrity_check).toBe("ok");
-      expect(parsed.data.included_files).toContain("sessions.db");
+      expect(parsed.data.included_files).toEqual([
+        "sessions.db",
+        "sessions-raw.db",
+        "sessions-tools.db",
+        "manifest.json",
+      ]);
       expect(existsSync(archivePath)).toBe(true);
 
       await execa("tar", ["-xzf", archivePath, "-C", restoreDir]);
@@ -565,6 +675,26 @@ describe("cli envelope", () => {
           )
           .get();
         expect(row?.title).toBe("Backup me");
+        attachArchive(restored, "raw", {
+          dbPath: join(restoreDir, "sessions.db"),
+        });
+        attachArchive(restored, "tools", {
+          dbPath: join(restoreDir, "sessions.db"),
+        });
+        expect(
+          restored
+            .prepare(
+              `SELECT COUNT(*) AS count FROM ${archiveAlias("raw")}.raw_events`,
+            )
+            .get(),
+        ).toEqual({ count: 1 });
+        expect(
+          restored
+            .prepare(
+              `SELECT COUNT(*) AS count FROM ${archiveAlias("tools")}.tool_outputs`,
+            )
+            .get(),
+        ).toEqual({ count: 1 });
       } finally {
         restored.close();
         rmSync(dir, { recursive: true, force: true });
@@ -572,6 +702,190 @@ describe("cli envelope", () => {
     },
     CLI_TEST_TIMEOUT,
   );
+
+  it("refuses backup output that aliases a live corpus database or lock", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "agentmine-backup-collision-"));
+    const dbPath = join(dir, "sessions.db");
+    const db = openDb({ path: dbPath });
+    db.close();
+
+    for (const output of [
+      dbPath,
+      archivePath("raw", dbPath),
+      `${dbPath}.lock`,
+    ]) {
+      const result = await runCli(["backup", "--output", output, "--force"], {
+        AGENTMINE_DB: dbPath,
+      });
+      expect(result.exitCode).toBe(2);
+      expect(JSON.parse(result.stdout.trim()).errors[0].name).toBe(
+        "INVALID_INPUT",
+      );
+    }
+    expect(existsSync(dbPath)).toBe(true);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("serializes backup and mutating purge against the corpus writer lock", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "agentmine-maintenance-lock-"));
+    const dbPath = join(dir, "sessions.db");
+    const backupPath = join(dir, "backup.tar.gz");
+    const db = openDb({ path: dbPath });
+    upsertSessionWithPayload(db, {
+      id: "cc--locked",
+      source: "claude-code",
+      projectPath: "/repo/drop",
+      messages: [],
+      contentHash: randomUUID(),
+    });
+    db.close();
+
+    const held = await acquireWriteLock({ command: "test", dbPath });
+    try {
+      for (const args of [
+        ["backup", "--output", backupPath],
+        ["purge", "--project-path-allow", "keep", "--yes"],
+      ]) {
+        const blocked = await runCli(args, {
+          AGENTMINE_DB: dbPath,
+          AGENTMINE_LOCK_TIMEOUT_MS: "0",
+        });
+        expect(blocked.exitCode).not.toBe(0);
+        expect(JSON.parse(blocked.stdout.trim())).toMatchObject({
+          status: "error",
+          errors: [{ name: "LOCKED", retryable: true }],
+        });
+      }
+    } finally {
+      held.release();
+    }
+    expect(existsSync(backupPath)).toBe(false);
+    const unchanged = openDb({ readonly: true, init: false, path: dbPath });
+    expect(
+      unchanged.prepare("SELECT COUNT(*) AS count FROM sessions").get(),
+    ).toEqual({ count: 1 });
+    unchanged.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("backs up an untouched pre-split corpus but gates normal commands", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "agentmine-legacy-maintenance-"));
+    const dbPath = join(dir, "sessions.db");
+    const backupPath = join(dir, "legacy-backup.tar.gz");
+    const legacy = new DatabaseSync(dbPath);
+    legacy.exec(`
+      CREATE TABLE sessions (
+        id TEXT PRIMARY KEY,
+        project_path TEXT
+      );
+      CREATE TABLE raw_events (
+        session_id TEXT NOT NULL,
+        seq INTEGER NOT NULL,
+        raw_json TEXT NOT NULL,
+        PRIMARY KEY(session_id, seq)
+      );
+      CREATE TABLE tool_outputs (
+        session_id TEXT NOT NULL,
+        turn INTEGER NOT NULL,
+        idx INTEGER NOT NULL,
+        output_text TEXT NOT NULL,
+        PRIMARY KEY(session_id, turn, idx)
+      );
+      INSERT INTO sessions VALUES ('cc--legacy', '/repo/legacy');
+      INSERT INTO raw_events VALUES ('cc--legacy', 1, '{"legacy":true}');
+      INSERT INTO tool_outputs VALUES ('cc--legacy', 1, 0, 'legacy output');
+    `);
+    legacy.close();
+
+    const backup = await runCli(["backup", "--output", backupPath], {
+      AGENTMINE_DB: dbPath,
+    });
+    expect(backup.exitCode).toBe(0);
+    expect(JSON.parse(backup.stdout.trim()).data).toMatchObject({
+      corpus_layout: "pre-split",
+      included_files: ["sessions.db", "manifest.json"],
+    });
+
+    const purge = await runCli(["purge", "--project-path-allow", "legacy"], {
+      AGENTMINE_DB: dbPath,
+    });
+    expect(purge.exitCode).toBe(2);
+    expect(JSON.parse(purge.stdout.trim())).toMatchObject({
+      status: "error",
+      errors: [{ name: "COMPACTION_REQUIRED", path: dbPath }],
+    });
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("resumes cold-payload deletion from a durable purge tombstone", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "agentmine-purge-resume-"));
+    const dbPath = join(dir, "sessions.db");
+    const db = openDb({ path: dbPath });
+    upsertSessionWithPayload(db, {
+      id: "cc--purge-resume",
+      source: "claude-code",
+      projectPath: "/repo/drop",
+      messages: [
+        {
+          turn: 1,
+          role: "assistant",
+          text: "",
+          toolCalls: [
+            {
+              name: "Read",
+              argsHash: "resume",
+              argsPreview: "resume",
+              outputFull: "pending private output",
+            },
+          ],
+        },
+      ],
+      rawEvents: [{ seq: 1, rawJson: '{"pending":true}' }],
+      contentHash: randomUUID(),
+    });
+    db.transaction(() => {
+      db.prepare(
+        `INSERT INTO pending_payload_purges
+           (session_id, raw_event_count, tool_output_count)
+         VALUES ('cc--purge-resume', 1, 1)`,
+      ).run();
+      db.prepare("DELETE FROM dirty_sessions WHERE session_id = ?").run(
+        "cc--purge-resume",
+      );
+      db.prepare("DELETE FROM sessions WHERE id = ?").run("cc--purge-resume");
+    })();
+    db.close();
+
+    const resumed = await runCli(
+      ["purge", "--project-path-allow", "keep", "--yes"],
+      { AGENTMINE_DB: dbPath },
+    );
+    expect(resumed.exitCode).toBe(0);
+    const checked = openDb({ readonly: true, init: false, path: dbPath });
+    attachArchive(checked, "raw", { dbPath });
+    attachArchive(checked, "tools", { dbPath });
+    expect(
+      checked
+        .prepare("SELECT COUNT(*) AS count FROM pending_payload_purges")
+        .get(),
+    ).toEqual({ count: 0 });
+    expect(
+      checked
+        .prepare(
+          `SELECT COUNT(*) AS count FROM ${archiveAlias("raw")}.raw_events`,
+        )
+        .get(),
+    ).toEqual({ count: 0 });
+    expect(
+      checked
+        .prepare(
+          `SELECT COUNT(*) AS count FROM ${archiveAlias("tools")}.tool_outputs`,
+        )
+        .get(),
+    ).toEqual({ count: 0 });
+    checked.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
 
   it(
     "refuses to overwrite an existing backup archive unless forced",
@@ -726,7 +1040,7 @@ describe("cli envelope", () => {
       const dbPath = join(dir, "test.db");
       const db = openDb({ path: dbPath });
       try {
-        upsertSession(db, {
+        upsertSessionWithPayload(db, {
           id: "cc--auth-router",
           source: "claude-code",
           projectPath: "/repo/app",
@@ -748,7 +1062,7 @@ describe("cli envelope", () => {
           ],
           contentHash: randomUUID(),
         });
-        upsertSession(db, {
+        upsertSessionWithPayload(db, {
           id: "cc--unrelated",
           source: "claude-code",
           projectPath: "/repo/app",
@@ -802,7 +1116,7 @@ describe("cli envelope", () => {
           ["cur--project-auth", "cursor", join(projectRoot, "packages", "web")],
           ["cc--other-auth", "claude-code", otherProject],
         ] as const) {
-          upsertSession(db, {
+          upsertSessionWithPayload(db, {
             id,
             source,
             projectPath,
@@ -853,7 +1167,7 @@ describe("cli envelope", () => {
       const db = openDb({ path: dbPath });
       try {
         for (const id of ["cc--current-session", "cur--prior-session"]) {
-          upsertSession(db, {
+          upsertSessionWithPayload(db, {
             id,
             source: id.startsWith("cur--") ? "cursor" : "claude-code",
             projectPath: projectRoot,
@@ -903,7 +1217,7 @@ describe("cli envelope", () => {
       const currentDay = Math.floor(Date.parse("2026-07-23T10:00:00Z") / 1000);
       const priorDay = Math.floor(Date.parse("2026-07-22T10:00:00Z") / 1000);
       try {
-        upsertSession(db, {
+        upsertSessionWithPayload(db, {
           id: "cx--agentic-docs-root",
           source: "codex",
           projectPath: "/repo/agent-context-kit",
@@ -919,7 +1233,7 @@ describe("cli envelope", () => {
           ],
           contentHash: randomUUID(),
         });
-        upsertSession(db, {
+        upsertSessionWithPayload(db, {
           id: "cx--agentic-docs-reviewer",
           source: "codex",
           parentSessionId: "cx--agentic-docs-root",
@@ -937,7 +1251,7 @@ describe("cli envelope", () => {
           ],
           contentHash: randomUUID(),
         });
-        upsertSession(db, {
+        upsertSessionWithPayload(db, {
           id: "cx--agentic-docs-injected-only",
           source: "codex",
           projectPath: "/repo/other",
@@ -953,7 +1267,7 @@ describe("cli envelope", () => {
           ],
           contentHash: randomUUID(),
         });
-        upsertSession(db, {
+        upsertSessionWithPayload(db, {
           id: "cx--agentic-docs-environment-only",
           source: "codex",
           projectPath: "/repo/other",
@@ -969,7 +1283,7 @@ describe("cli envelope", () => {
           ],
           contentHash: randomUUID(),
         });
-        upsertSession(db, {
+        upsertSessionWithPayload(db, {
           id: "cx--agentic-docs-plugin-envelope",
           source: "codex",
           projectPath: "/repo/other",
@@ -985,7 +1299,7 @@ describe("cli envelope", () => {
           ],
           contentHash: randomUUID(),
         });
-        upsertSession(db, {
+        upsertSessionWithPayload(db, {
           id: "cx--agentic-docs-old",
           source: "codex",
           projectPath: "/repo/agent-context-kit",
@@ -1095,7 +1409,7 @@ describe("cli envelope", () => {
       const dbPath = join(dir, "test.db");
       const db = openDb({ path: dbPath });
       try {
-        upsertSession(db, {
+        upsertSessionWithPayload(db, {
           id: "cur--banana-card",
           source: "cursor",
           projectPath: "/repo/content",
@@ -1139,7 +1453,7 @@ describe("cli envelope", () => {
       const db = openDb({ path: dbPath });
       const longText = "large markdown transcript output ".repeat(120);
       try {
-        upsertSession(db, {
+        upsertSessionWithPayload(db, {
           id: "cc--large-markdown",
           source: "claude-code",
           projectPath: "/repo/app",
@@ -1181,7 +1495,7 @@ describe("cli envelope", () => {
       const dbPath = join(dir, "test.db");
       const db = openDb({ path: dbPath });
       try {
-        upsertSession(db, {
+        upsertSessionWithPayload(db, {
           id: "cc--show-context",
           source: "claude-code",
           projectPath: "/repo/app",
@@ -1234,7 +1548,7 @@ describe("cli envelope", () => {
       const dbPath = join(dir, "test.db");
       const db = openDb({ path: dbPath });
       try {
-        upsertSession(db, {
+        upsertSessionWithPayload(db, {
           id: "cc--slice-me",
           source: "claude-code",
           projectPath: "/repo/app",
@@ -1291,7 +1605,7 @@ describe("cli envelope", () => {
       const dbPath = join(dir, "test.db");
       const db = openDb({ path: dbPath });
       try {
-        upsertSession(db, {
+        upsertSessionWithPayload(db, {
           id: "cc--list-me",
           source: "claude-code",
           projectPath: "/repo/app",
@@ -1366,7 +1680,7 @@ describe("cli envelope", () => {
             contentHash: "other-root",
           },
         ]) {
-          upsertSession(db, {
+          upsertSessionWithPayload(db, {
             source: "codex",
             projectPath: "/repo/app",
             messages: [
@@ -1510,8 +1824,8 @@ describe("cli envelope", () => {
       expect(freshResult.data.codex_token_usage_backfill).toBeUndefined();
 
       const legacy = openDb({ path: dbPath });
-      upsertSession(legacy, { ...root, agentType: "codex-tui" });
-      upsertSession(legacy, {
+      upsertSessionWithPayload(legacy, { ...root, agentType: "codex-tui" });
+      upsertSessionWithPayload(legacy, {
         ...child,
         parentSessionId: undefined,
         agentType: "codex-tui",
@@ -1792,7 +2106,7 @@ describe("cli envelope", () => {
       if (!parsed) throw new Error("expected Codex usage fixture");
 
       const legacy = openDb({ path: dbPath });
-      upsertSession(legacy, {
+      upsertSessionWithPayload(legacy, {
         ...parsed,
         inputTokens: 1_100,
         outputTokens: 115,
@@ -1847,7 +2161,7 @@ describe("cli envelope", () => {
       expect(
         getMeta(migrated, CODEX_LINEAGE_BACKFILL_META_KEY),
       ).toBeUndefined();
-      expect(getMeta(migrated, "schema_version")).toBe("15");
+      expect(getMeta(migrated, "schema_version")).toBe("16");
       migrated.close();
       rmSync(dir, { recursive: true, force: true });
     },
@@ -1858,7 +2172,7 @@ describe("cli envelope", () => {
     const dir = mkdtempSync(join(tmpdir(), "agentmine-prices-migration-lock-"));
     const dbPath = join(dir, "sessions.db");
     const legacy = openDb({ path: dbPath });
-    upsertSession(legacy, {
+    upsertSessionWithPayload(legacy, {
       id: "cx--prices-migration-lock",
       source: "codex",
       model: "gpt-5.4",
@@ -1921,7 +2235,7 @@ describe("cli envelope", () => {
     expect(synced.exitCode).toBe(0);
 
     const migrated = openDb({ readonly: true, init: false, path: dbPath });
-    expect(getMeta(migrated, "schema_version")).toBe("15");
+    expect(getMeta(migrated, "schema_version")).toBe("16");
     expect(getMeta(migrated, CODEX_TOKEN_USAGE_BACKFILL_META_KEY)).toBe("1");
     expect(
       migrated

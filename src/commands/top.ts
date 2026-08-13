@@ -3,11 +3,16 @@ import { Errors } from "../contract/errors.js";
 import { type CommandOutcome, runCommand } from "../contract/result.js";
 import {
   CODEX_TOKEN_USAGE_BACKFILL_META_KEY,
+  type DatabaseType,
   dbExists,
   getMeta,
   openDb,
   parseStoredSchemaVersion,
 } from "../db/client.js";
+import {
+  extractionPendingWarnings,
+  readWithFreshnessSnapshot,
+} from "../db/freshness.js";
 import { aggregateNgrams } from "../extract/ngrams.js";
 import { parseSince, parseUntil } from "./_filters.js";
 
@@ -63,24 +68,26 @@ const topFiles = defineCommand({
         const db = openDb({ readonly: true });
         try {
           const limit = toLimit(args.limit, 20);
-          let rows: unknown[];
-          if (args.op) {
-            rows = db
-              .prepare(
-                `SELECT path, COUNT(*) AS ops, COUNT(DISTINCT session_id) AS sessions
-                   FROM files_touched WHERE op = ?
-                   GROUP BY path ORDER BY ops DESC LIMIT ?`,
-              )
-              .all(String(args.op), limit);
-          } else {
-            rows = db
-              .prepare(
-                `SELECT path, ops, reads, writes, sessions FROM v_top_files
-                  ORDER BY ops DESC LIMIT ?`,
-              )
-              .all(limit);
-          }
-          return { data: { rows, limit } };
+          return factOutcome(db, () => {
+            let rows: unknown[];
+            if (args.op) {
+              rows = db
+                .prepare(
+                  `SELECT path, COUNT(*) AS ops, COUNT(DISTINCT session_id) AS sessions
+                     FROM files_touched WHERE op = ?
+                     GROUP BY path ORDER BY ops DESC LIMIT ?`,
+                )
+                .all(String(args.op), limit);
+            } else {
+              rows = db
+                .prepare(
+                  `SELECT path, ops, reads, writes, sessions FROM v_top_files
+                    ORDER BY ops DESC LIMIT ?`,
+                )
+                .all(limit);
+            }
+            return { rows, limit };
+          });
         } finally {
           db.close();
         }
@@ -108,39 +115,45 @@ const topCommands = defineCommand({
         const db = openDb({ readonly: true });
         try {
           const limit = toLimit(args.limit, 20);
-          let rows: unknown[];
-          let filter: string | undefined;
-          if (args.failed) {
-            const where = args.head
-              ? `cmd_head LIKE ? AND exit_code != 0`
-              : `exit_code != 0`;
-            const params: unknown[] = args.head
-              ? [`${args.head}%`, limit]
-              : [limit];
-            rows = db
-              .prepare(
-                `SELECT cmd_head, cmd_full, COUNT(*) AS failures, session_id, turn
-                   FROM shell_commands WHERE ${where}
-                   GROUP BY cmd_full ORDER BY failures DESC LIMIT ?`,
-              )
-              .all(...params);
-            filter = "failed";
-          } else if (args.head) {
-            rows = db
-              .prepare(
-                `SELECT cmd_head, runs, failures, sessions FROM v_top_shell_heads
-                   WHERE cmd_head LIKE ? ORDER BY runs DESC LIMIT ?`,
-              )
-              .all(`${args.head}%`, limit);
-          } else {
-            rows = db
-              .prepare(
-                `SELECT cmd_head, runs, failures, sessions FROM v_top_shell_heads
-                  ORDER BY runs DESC LIMIT ?`,
-              )
-              .all(limit);
-          }
-          return { data: { rows, limit, ...(filter ? { filter } : {}) } };
+          return factOutcome(db, () => {
+            let rows: unknown[];
+            let filter: string | undefined;
+            if (args.failed) {
+              const where = args.head
+                ? `cmd_head LIKE ? AND exit_code != 0`
+                : `exit_code != 0`;
+              const params: unknown[] = args.head
+                ? [`${args.head}%`, limit]
+                : [limit];
+              rows = db
+                .prepare(
+                  `SELECT cmd_head, cmd_full, COUNT(*) AS failures, session_id, turn
+                     FROM shell_commands WHERE ${where}
+                     GROUP BY cmd_full ORDER BY failures DESC LIMIT ?`,
+                )
+                .all(...params);
+              filter = "failed";
+            } else if (args.head) {
+              rows = db
+                .prepare(
+                  `SELECT cmd_head, runs, failures, sessions FROM v_top_shell_heads
+                     WHERE cmd_head LIKE ? ORDER BY runs DESC LIMIT ?`,
+                )
+                .all(`${args.head}%`, limit);
+            } else {
+              rows = db
+                .prepare(
+                  `SELECT cmd_head, runs, failures, sessions FROM v_top_shell_heads
+                    ORDER BY runs DESC LIMIT ?`,
+                )
+                .all(limit);
+            }
+            return {
+              rows,
+              limit,
+              ...(filter ? { filter } : {}),
+            };
+          });
         } finally {
           db.close();
         }
@@ -169,30 +182,32 @@ const topCorrections = defineCommand({
               `--by must be one of kind|project|source (got '${by}')`,
             );
           }
-          let rows: unknown[];
-          if (by === "kind") {
-            rows = db.prepare(`SELECT * FROM v_corrections_by_kind`).all();
-          } else if (by === "project") {
-            rows = db
-              .prepare(
-                `SELECT project_path, kind, COUNT(*) AS n,
-                        SUM(COALESCE(followed_by_revert, 0)) AS reverts
-                   FROM user_corrections
-                   WHERE project_path IS NOT NULL
-                   GROUP BY project_path, kind
-                   HAVING n >= 1
-                   ORDER BY n DESC LIMIT ?`,
-              )
-              .all(limit);
-          } else {
-            rows = db
-              .prepare(
-                `SELECT source, kind, COUNT(*) AS n FROM user_corrections
-                 GROUP BY source, kind ORDER BY source, n DESC`,
-              )
-              .all();
-          }
-          return { data: { by, rows, limit } };
+          return factOutcome(db, () => {
+            let rows: unknown[];
+            if (by === "kind") {
+              rows = db.prepare(`SELECT * FROM v_corrections_by_kind`).all();
+            } else if (by === "project") {
+              rows = db
+                .prepare(
+                  `SELECT project_path, kind, COUNT(*) AS n,
+                          SUM(COALESCE(followed_by_revert, 0)) AS reverts
+                     FROM user_corrections
+                     WHERE project_path IS NOT NULL
+                     GROUP BY project_path, kind
+                     HAVING n >= 1
+                     ORDER BY n DESC LIMIT ?`,
+                )
+                .all(limit);
+            } else {
+              rows = db
+                .prepare(
+                  `SELECT source, kind, COUNT(*) AS n FROM user_corrections
+                   GROUP BY source, kind ORDER BY source, n DESC`,
+                )
+                .all();
+            }
+            return { by, rows, limit };
+          });
         } finally {
           db.close();
         }
@@ -226,41 +241,43 @@ const topSkills = defineCommand({
         try {
           const limit = toLimit(args.limit, 20);
           const hasRange = range.since !== null || range.until !== null;
-          let rows: unknown[];
-          if (hasRange) {
-            const clauses: string[] = [];
-            const params: unknown[] = [];
-            if (range.since !== null) {
-              clauses.push("sess.started_at >= ?");
-              params.push(range.since);
+          return factOutcome(db, () => {
+            let rows: unknown[];
+            if (hasRange) {
+              const clauses: string[] = [];
+              const params: unknown[] = [];
+              if (range.since !== null) {
+                clauses.push("sess.started_at >= ?");
+                params.push(range.since);
+              }
+              if (range.until !== null) {
+                clauses.push("sess.started_at < ?");
+                params.push(range.until);
+              }
+              params.push(limit);
+              rows = db
+                .prepare(
+                  `SELECT si.skill_name,
+                          COUNT(*) AS invocations,
+                          COUNT(DISTINCT si.session_id) AS sessions
+                     FROM skills_invoked si
+                     JOIN sessions sess ON sess.id = si.session_id
+                    WHERE ${clauses.join(" AND ")}
+                    GROUP BY si.skill_name
+                    ORDER BY invocations DESC
+                    LIMIT ?`,
+                )
+                .all(...params);
+            } else {
+              rows = db
+                .prepare(
+                  `SELECT skill_name, invocations, sessions FROM v_top_skills
+                    ORDER BY invocations DESC LIMIT ?`,
+                )
+                .all(limit);
             }
-            if (range.until !== null) {
-              clauses.push("sess.started_at < ?");
-              params.push(range.until);
-            }
-            params.push(limit);
-            rows = db
-              .prepare(
-                `SELECT si.skill_name,
-                        COUNT(*) AS invocations,
-                        COUNT(DISTINCT si.session_id) AS sessions
-                   FROM skills_invoked si
-                   JOIN sessions sess ON sess.id = si.session_id
-                  WHERE ${clauses.join(" AND ")}
-                  GROUP BY si.skill_name
-                  ORDER BY invocations DESC
-                  LIMIT ?`,
-              )
-              .all(...params);
-          } else {
-            rows = db
-              .prepare(
-                `SELECT skill_name, invocations, sessions FROM v_top_skills
-                  ORDER BY invocations DESC LIMIT ?`,
-              )
-              .all(limit);
-          }
-          return { data: { rows, limit, ...rangeMeta(range) } };
+            return { rows, limit, ...rangeMeta(range) };
+          });
         } finally {
           db.close();
         }
@@ -283,23 +300,25 @@ const topMcp = defineCommand({
         const db = openDb({ readonly: true });
         try {
           const limit = toLimit(args.limit, 30);
-          let rows: unknown[];
-          if (args.server) {
-            rows = db
-              .prepare(
-                `SELECT server, tool, calls, sessions FROM v_top_mcp
-                  WHERE server LIKE ? ORDER BY calls DESC LIMIT ?`,
-              )
-              .all(`${args.server}%`, limit);
-          } else {
-            rows = db
-              .prepare(
-                `SELECT server, tool, calls, sessions FROM v_top_mcp
-                  ORDER BY calls DESC LIMIT ?`,
-              )
-              .all(limit);
-          }
-          return { data: { rows, limit } };
+          return factOutcome(db, () => {
+            let rows: unknown[];
+            if (args.server) {
+              rows = db
+                .prepare(
+                  `SELECT server, tool, calls, sessions FROM v_top_mcp
+                    WHERE server LIKE ? ORDER BY calls DESC LIMIT ?`,
+                )
+                .all(`${args.server}%`, limit);
+            } else {
+              rows = db
+                .prepare(
+                  `SELECT server, tool, calls, sessions FROM v_top_mcp
+                    ORDER BY calls DESC LIMIT ?`,
+                )
+                .all(limit);
+            }
+            return { rows, limit };
+          });
         } finally {
           db.close();
         }
@@ -322,23 +341,25 @@ const topWeb = defineCommand({
         const db = openDb({ readonly: true });
         try {
           const limit = toLimit(args.limit, 20);
-          let rows: unknown[];
-          if (args.domain) {
-            rows = db
-              .prepare(
-                `SELECT domain, kind, hits, sessions FROM v_top_web
-                  WHERE domain LIKE ? ORDER BY hits DESC LIMIT ?`,
-              )
-              .all(`${args.domain}%`, limit);
-          } else {
-            rows = db
-              .prepare(
-                `SELECT domain, kind, hits, sessions FROM v_top_web
-                  ORDER BY hits DESC LIMIT ?`,
-              )
-              .all(limit);
-          }
-          return { data: { rows, limit } };
+          return factOutcome(db, () => {
+            let rows: unknown[];
+            if (args.domain) {
+              rows = db
+                .prepare(
+                  `SELECT domain, kind, hits, sessions FROM v_top_web
+                    WHERE domain LIKE ? ORDER BY hits DESC LIMIT ?`,
+                )
+                .all(`${args.domain}%`, limit);
+            } else {
+              rows = db
+                .prepare(
+                  `SELECT domain, kind, hits, sessions FROM v_top_web
+                    ORDER BY hits DESC LIMIT ?`,
+                )
+                .all(limit);
+            }
+            return { rows, limit };
+          });
         } finally {
           db.close();
         }
@@ -382,14 +403,16 @@ const topSequences = defineCommand({
               : null;
 
           if (project === null) {
-            const rows = db
-              .prepare(
-                `SELECT sequence, count, sessions, example_session_id, example_start_turn
-                   FROM tool_call_ngrams WHERE n = ?
-                  ORDER BY count DESC LIMIT ?`,
-              )
-              .all(n, limit);
-            return { data: { rows, n, limit } };
+            return factOutcome(db, () => {
+              const rows = db
+                .prepare(
+                  `SELECT sequence, count, sessions, example_session_id, example_start_turn
+                     FROM tool_call_ngrams WHERE n = ?
+                    ORDER BY count DESC LIMIT ?`,
+                )
+                .all(n, limit);
+              return { rows, n, limit };
+            });
           }
 
           const minCount = toLimit(args["min-count"], 3);
@@ -445,13 +468,15 @@ const topPrompts = defineCommand({
         const db = openDb({ readonly: true });
         try {
           const limit = toLimit(args.limit, 20);
-          const rows = db
-            .prepare(
-              `SELECT template, count, example_session_ids FROM prompt_templates
-                ORDER BY count DESC LIMIT ?`,
-            )
-            .all(limit);
-          return { data: { rows, limit } };
+          return factOutcome(db, () => {
+            const rows = db
+              .prepare(
+                `SELECT template, count, example_session_ids FROM prompt_templates
+                  ORDER BY count DESC LIMIT ?`,
+              )
+              .all(limit);
+            return { rows, limit };
+          });
         } finally {
           db.close();
         }
@@ -474,25 +499,27 @@ const topErrors = defineCommand({
         const db = openDb({ readonly: true });
         try {
           const limit = toLimit(args.limit, 20);
-          let rows: unknown[];
-          if (args.tool) {
-            rows = db
-              .prepare(
-                `SELECT error_category, COUNT(*) AS n, COUNT(DISTINCT session_id) AS sessions
-                   FROM tool_errors WHERE tool_name = ?
-                  GROUP BY error_category ORDER BY n DESC LIMIT ?`,
-              )
-              .all(String(args.tool), limit);
-          } else {
-            rows = db
-              .prepare(
-                `SELECT tool_name, error_category, COUNT(*) AS n
-                   FROM tool_errors GROUP BY tool_name, error_category
-                   ORDER BY n DESC LIMIT ?`,
-              )
-              .all(limit);
-          }
-          return { data: { rows, limit } };
+          return factOutcome(db, () => {
+            let rows: unknown[];
+            if (args.tool) {
+              rows = db
+                .prepare(
+                  `SELECT error_category, COUNT(*) AS n, COUNT(DISTINCT session_id) AS sessions
+                     FROM tool_errors WHERE tool_name = ?
+                    GROUP BY error_category ORDER BY n DESC LIMIT ?`,
+                )
+                .all(String(args.tool), limit);
+            } else {
+              rows = db
+                .prepare(
+                  `SELECT tool_name, error_category, COUNT(*) AS n
+                     FROM tool_errors GROUP BY tool_name, error_category
+                     ORDER BY n DESC LIMIT ?`,
+                )
+                .all(limit);
+            }
+            return { rows, limit };
+          });
         } finally {
           db.close();
         }
@@ -526,42 +553,44 @@ const topSubagents = defineCommand({
         try {
           const limit = toLimit(args.limit, 20);
           const hasRange = range.since !== null || range.until !== null;
-          let rows: unknown[];
-          if (hasRange) {
-            const clauses: string[] = [];
-            const params: unknown[] = [];
-            if (range.since !== null) {
-              clauses.push("sess.started_at >= ?");
-              params.push(range.since);
+          return factOutcome(db, () => {
+            let rows: unknown[];
+            if (hasRange) {
+              const clauses: string[] = [];
+              const params: unknown[] = [];
+              if (range.since !== null) {
+                clauses.push("sess.started_at >= ?");
+                params.push(range.since);
+              }
+              if (range.until !== null) {
+                clauses.push("sess.started_at < ?");
+                params.push(range.until);
+              }
+              params.push(limit);
+              rows = db
+                .prepare(
+                  `SELECT sa.subagent_type,
+                          COUNT(*) AS invocations,
+                          COUNT(DISTINCT sa.parent_session_id) AS parent_sessions
+                     FROM subagent_invocations sa
+                     JOIN sessions sess ON sess.id = sa.parent_session_id
+                    WHERE ${clauses.join(" AND ")}
+                      AND sa.subagent_type IS NOT NULL
+                    GROUP BY sa.subagent_type
+                    ORDER BY invocations DESC
+                    LIMIT ?`,
+                )
+                .all(...params);
+            } else {
+              rows = db
+                .prepare(
+                  `SELECT subagent_type, invocations, parent_sessions FROM v_top_subagents
+                    ORDER BY invocations DESC LIMIT ?`,
+                )
+                .all(limit);
             }
-            if (range.until !== null) {
-              clauses.push("sess.started_at < ?");
-              params.push(range.until);
-            }
-            params.push(limit);
-            rows = db
-              .prepare(
-                `SELECT sa.subagent_type,
-                        COUNT(*) AS invocations,
-                        COUNT(DISTINCT sa.parent_session_id) AS parent_sessions
-                   FROM subagent_invocations sa
-                   JOIN sessions sess ON sess.id = sa.parent_session_id
-                  WHERE ${clauses.join(" AND ")}
-                    AND sa.subagent_type IS NOT NULL
-                  GROUP BY sa.subagent_type
-                  ORDER BY invocations DESC
-                  LIMIT ?`,
-              )
-              .all(...params);
-          } else {
-            rows = db
-              .prepare(
-                `SELECT subagent_type, invocations, parent_sessions FROM v_top_subagents
-                  ORDER BY invocations DESC LIMIT ?`,
-              )
-              .all(limit);
-          }
-          return { data: { rows, limit, ...rangeMeta(range) } };
+            return { rows, limit, ...rangeMeta(range) };
+          });
         } finally {
           db.close();
         }
@@ -617,16 +646,18 @@ const topSelfResolutions = defineCommand({
                substr(sr.args_preview, 1, 160) AS args_preview,
                s.project_path`;
 
-          const rows = db
-            .prepare(
-              `SELECT ${baseCols}
-                 FROM self_resolutions sr
-                 JOIN sessions s ON s.id = sr.session_id
-                WHERE ${where}
-                ORDER BY sr.gap_turns DESC, sr.session_id LIMIT ?`,
-            )
-            .all(...params);
-          return { data: { rows, limit, minGap, showContext } };
+          return factOutcome(db, () => {
+            const rows = db
+              .prepare(
+                `SELECT ${baseCols}
+                   FROM self_resolutions sr
+                   JOIN sessions s ON s.id = sr.session_id
+                  WHERE ${where}
+                  ORDER BY sr.gap_turns DESC, sr.session_id LIMIT ?`,
+              )
+              .all(...params);
+            return { rows, limit, minGap, showContext };
+          });
         } finally {
           db.close();
         }
@@ -993,6 +1024,14 @@ function requireDb(): void {
       "sessions.db not found. Run `agentmine normalize` + `agentmine extract` first.",
     );
   }
+}
+
+function factOutcome(db: DatabaseType, read: () => Data): Outcome {
+  const { value: data, freshness } = readWithFreshnessSnapshot(db, read);
+  return {
+    data,
+    warnings: extractionPendingWarnings(freshness),
+  };
 }
 
 function toLimit(v: unknown, fallback: number): number {

@@ -5,8 +5,15 @@ import { Errors } from "../contract/errors.js";
 import { runCommand } from "../contract/result.js";
 import type { DatabaseType } from "../db/client.js";
 import { dbExists, openDb } from "../db/client.js";
+import {
+  extractionPendingWarnings,
+  readWithFreshnessSnapshot,
+} from "../db/freshness.js";
 import { deserializeVector } from "../embeddings/chunks.js";
-import { createEmbeddingProvider } from "../embeddings/providers.js";
+import {
+  createEmbeddingProvider,
+  type EmbeddingModelInfo,
+} from "../embeddings/providers.js";
 import { INJECTED_TEXT_PREFIXES, isInjectedNoise } from "../noise.js";
 import { parseSince, parseUntil } from "./_filters.js";
 
@@ -195,12 +202,7 @@ export const similarCommand = defineCommand({
           const explicitProject = args.project
             ? String(args.project)
             : undefined;
-          const inferredProject =
-            explicitProject || args["all-projects"]
-              ? undefined
-              : inferCurrentProjectFilter(db, process.cwd());
-          const project = explicitProject ?? inferredProject;
-          const excludedSessions = resolveExcludedSessions(db, [
+          const exclusionSeeds = [
             ...parseSessionList(args["exclude-session"]),
             ...parseSessionList(args["exclude-run-family"]),
             ...parseSessionList(process.env.AGENTMINE_CURRENT_SESSION_ID),
@@ -208,39 +210,104 @@ export const similarCommand = defineCommand({
             ...parseSessionList(
               process.env.AGENTMINE_CURRENT_RUN_FAMILY_SESSION_ID,
             ),
-          ]);
+          ];
           const providerName = String(args.provider ?? "ollama");
           const model = String(
             args.model ??
               (providerName === "fake" ? "fake" : "nomic-embed-text"),
           );
-          let modeSelection = selectMode(db, {
-            requestedMode,
-            providerName,
-            model,
-            source: args.source ? String(args.source) : undefined,
+          const snapshot = readWithFreshnessSnapshot(db, () => {
+            const inferredProject =
+              explicitProject || args["all-projects"]
+                ? undefined
+                : inferCurrentProjectFilter(db, process.cwd());
+            const project = explicitProject ?? inferredProject;
+            const excludedSessions =
+              exclusionSeeds.length > 0
+                ? resolveExcludedSessions(db, exclusionSeeds)
+                : [];
+            const modeSelection = selectMode(db, {
+              requestedMode,
+              providerName,
+              model,
+              source: args.source ? String(args.source) : undefined,
+              project,
+              excludedSessions,
+              filters,
+            });
+            const mode = modeSelection.selected;
+            const ftsRows =
+              mode === "embedding"
+                ? []
+                : findFtsRows(db, {
+                    query: matchQuery,
+                    limit: Math.max(limit * 20, 50),
+                    source: args.source ? String(args.source) : undefined,
+                    project,
+                    role: args.role ? String(args.role) : undefined,
+                    excludeSessions: excludedSessions,
+                    filters,
+                  });
+            const embeddingCandidates =
+              mode === "fts"
+                ? []
+                : findEmbeddingCandidateRows(db, {
+                    modelInfo: createEmbeddingProvider(
+                      providerName,
+                      model,
+                    ).modelInfo(model),
+                    source: args.source ? String(args.source) : undefined,
+                    project,
+                    excludeSessions: excludedSessions,
+                    filters,
+                  });
+            return {
+              inferredProject,
+              project,
+              excludedSessions,
+              modeSelection,
+              mode,
+              ftsRows,
+              embeddingCandidates,
+            };
+          });
+          const {
+            inferredProject,
             project,
             excludedSessions,
-            filters,
-          });
-          const mode = modeSelection.selected;
-          const ftsRows =
-            mode === "embedding"
-              ? []
-              : findFtsRows(db, {
-                  query: matchQuery,
-                  limit: Math.max(limit * 20, 50),
-                  source: args.source ? String(args.source) : undefined,
-                  project,
-                  role: args.role ? String(args.role) : undefined,
-                  excludeSessions: excludedSessions,
-                  filters,
-                });
+            ftsRows,
+            embeddingCandidates,
+          } = snapshot.value;
+          let { modeSelection, mode } = snapshot.value;
+          const freshnessWarnings =
+            exclusionSeeds.length > 0
+              ? extractionPendingWarnings(snapshot.freshness)
+              : [];
+
+          let embeddingRows: SimilarRow[] = [];
+          if (mode !== "fts") {
+            try {
+              const provider = createEmbeddingProvider(providerName, model);
+              const queryEmbedding = await provider.embedQuery(query);
+              embeddingRows = rankEmbeddingRows(
+                query,
+                queryEmbedding.vector,
+                embeddingCandidates,
+                filters,
+              );
+            } catch (error) {
+              if (requestedMode !== "auto") throw error;
+              modeSelection = fallBackToFts(
+                modeSelection,
+                "provider_unavailable",
+              );
+              mode = "fts";
+            }
+          }
 
           if (mode === "fts") {
             const grouped = groupMatches(ftsRows);
             const finalized = finalizeRows(query, grouped, limit);
-            const warnings = [...finalized.warnings];
             return {
               data: {
                 query,
@@ -256,56 +323,15 @@ export const similarCommand = defineCommand({
                     : null,
                 ...searchFilterFields(filters),
                 excluded_sessions: excludedSessions,
-                ...warningFields(warnings),
+                ...warningFields(finalized.warnings),
                 ...confidenceFields(finalized.lowConfidence),
                 row_count: finalized.rows.length,
                 rows: finalized.rows,
               },
+              warnings: freshnessWarnings,
             };
           }
 
-          let embeddingRows: SimilarRow[];
-          try {
-            embeddingRows = await findEmbeddingRows(db, {
-              query,
-              providerName,
-              model,
-              source: args.source ? String(args.source) : undefined,
-              project,
-              excludeSessions: excludedSessions,
-              filters,
-            });
-          } catch (e) {
-            if (requestedMode !== "auto") throw e;
-            modeSelection = fallBackToFts(
-              modeSelection,
-              "provider_unavailable",
-            );
-            const grouped = groupMatches(ftsRows);
-            const finalized = finalizeRows(query, grouped, limit);
-            const warnings = [...finalized.warnings];
-            return {
-              data: {
-                query,
-                match_query: matchQuery,
-                mode: "fts",
-                requested_mode: requestedMode,
-                mode_selection: modeSelection,
-                project_filter: project ?? null,
-                project_filter_source: explicitProject
-                  ? "explicit"
-                  : inferredProject
-                    ? "cwd"
-                    : null,
-                ...searchFilterFields(filters),
-                excluded_sessions: excludedSessions,
-                ...warningFields(warnings),
-                ...confidenceFields(finalized.lowConfidence),
-                row_count: finalized.rows.length,
-                rows: finalized.rows,
-              },
-            };
-          }
           const rows =
             mode === "embedding"
               ? embeddingRows
@@ -339,6 +365,7 @@ export const similarCommand = defineCommand({
               row_count: finalized.rows.length,
               rows: finalized.rows,
             },
+            warnings: freshnessWarnings,
           };
         } catch (e) {
           throw Errors.invalidInput(
@@ -447,20 +474,10 @@ function groupMatches(rows: MatchRow[]): SimilarRow[] {
   return [...bySession.values()].sort((a, b) => a.score - b.score);
 }
 
-async function findEmbeddingRows(
+function requireEmbeddingModel(
   db: DatabaseType,
-  opts: {
-    query: string;
-    providerName: string;
-    model: string;
-    source?: string;
-    project?: string;
-    excludeSessions?: string[];
-    filters: SimilarFilters;
-  },
-): Promise<SimilarRow[]> {
-  const provider = createEmbeddingProvider(opts.providerName, opts.model);
-  const modelInfo = provider.modelInfo(opts.model);
+  modelInfo: EmbeddingModelInfo,
+): number {
   const modelRow = db
     .prepare(
       `SELECT id FROM embedding_models
@@ -474,10 +491,22 @@ async function findEmbeddingRows(
       `No embedding index found for ${modelInfo.provider}/${modelInfo.model}/${modelInfo.dimensions}. Run \`agentmine embed --provider ${modelInfo.provider} --model ${modelInfo.model}\` first.`,
     );
   }
+  return modelRow.id;
+}
 
-  const queryEmbedding = await provider.embedQuery(opts.query);
+function findEmbeddingCandidateRows(
+  db: DatabaseType,
+  opts: {
+    modelInfo: EmbeddingModelInfo;
+    source?: string;
+    project?: string;
+    excludeSessions?: string[];
+    filters: SimilarFilters;
+  },
+): EmbeddingCandidateRow[] {
+  const modelId = requireEmbeddingModel(db, opts.modelInfo);
   const clauses = ["e.model_id = ?"];
-  const params: unknown[] = [modelRow.id];
+  const params: unknown[] = [modelId];
   if (opts.source) {
     clauses.push("s.source = ?");
     params.push(opts.source);
@@ -497,7 +526,7 @@ async function findEmbeddingRows(
     opts.excludeSessions,
   );
 
-  const rows = db
+  return db
     .prepare(
       `SELECT c.id AS chunk_id, c.session_id, c.start_turn, c.end_turn,
               c.retrieval_text, c.text_preview, c.source_kind,
@@ -510,13 +539,20 @@ async function findEmbeddingRows(
         WHERE ${clauses.join(" AND ")}`,
     )
     .all(...params) as EmbeddingCandidateRow[];
+}
 
-  const toolQuery = isToolQuery(opts.query);
+function rankEmbeddingRows(
+  query: string,
+  queryVector: Float32Array,
+  rows: EmbeddingCandidateRow[],
+  filters: SimilarFilters,
+): SimilarRow[] {
+  const toolQuery = isToolQuery(query);
   const bySession = new Map<string, SimilarRow>();
   for (const row of rows) {
-    const title = visibleTitle(row.title, opts.filters.includeInjected);
+    const title = visibleTitle(row.title, filters.includeInjected);
     let score = cosine(
-      queryEmbedding.vector,
+      queryVector,
       deserializeVector(row.vector),
       row.vector_norm,
     );
@@ -547,7 +583,7 @@ async function findEmbeddingRows(
     const existing = bySession.get(row.session_id);
     if (
       !existing ||
-      shouldReplaceEmbeddingCandidate(opts.query, existing, candidate)
+      shouldReplaceEmbeddingCandidate(query, existing, candidate)
     ) {
       bySession.set(row.session_id, candidate);
     } else if (existing.snippets.length < 3) {

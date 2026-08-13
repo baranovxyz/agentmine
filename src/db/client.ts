@@ -7,7 +7,7 @@ import { Database } from "./sqlite.js";
 
 type DatabaseType = Database;
 
-export const CURRENT_SCHEMA_VERSION = 15;
+export const CURRENT_SCHEMA_VERSION = 16;
 const SCHEMA_VERSION = String(CURRENT_SCHEMA_VERSION);
 export const CODEX_LINEAGE_BACKFILL_META_KEY = "codex_lineage_backfill_pending";
 export const CODEX_TOKEN_USAGE_BACKFILL_META_KEY =
@@ -22,6 +22,8 @@ export interface OpenDbOptions {
   init?: boolean;
   /** Override DB path. Default: config.getDbPath(). */
   path?: string;
+  /** Recovery-only escape hatch for `backup` and `compact`. */
+  allowPreSplit?: boolean;
 }
 
 /** Parse persisted schema metadata without accepting partial or unsafe numbers. */
@@ -78,6 +80,14 @@ export function openDb(opts: OpenDbOptions = {}): DatabaseType {
     );
   }
 
+  const preSplit =
+    tableExists(db, "sessions") &&
+    (tableExists(db, "raw_events") || tableExists(db, "tool_outputs"));
+  if (preSplit && !opts.allowPreSplit) {
+    db.close();
+    throw Errors.compactionRequired(path);
+  }
+
   // Setting WAL can create or update sidecar files. A read-only connection
   // must inherit the database's existing journal mode instead of requesting a
   // write; bun:sqlite rejects that write while node:sqlite may appear to allow
@@ -97,6 +107,14 @@ export function openDb(opts: OpenDbOptions = {}): DatabaseType {
   }
 
   return db;
+}
+
+/** Fail before a filesystem-only workflow mutates state around a legacy corpus. */
+export function assertConfiguredCorpusReady(): void {
+  const path = getDbPath();
+  if (!dbExists(path)) return;
+  const db = openDb({ readonly: true, init: false, path });
+  db.close();
 }
 
 function applyDataMigrations(db: DatabaseType): void {
@@ -175,6 +193,11 @@ function applySchema(db: DatabaseType): void {
     addColumnIfMissing(db, "sessions", "cache_creation_tokens", "INTEGER");
     addColumnIfMissing(db, "sessions", "reasoning_tokens", "INTEGER");
     addColumnIfMissing(db, "sessions", "aborted_turns", "INTEGER DEFAULT 0");
+    // Schema v16: per-session payload row counts, so corpus totals never need
+    // to walk a payload archive's index. Null on a pre-split corpus
+    // until `agentmine compact` backfills them.
+    addColumnIfMissing(db, "sessions", "raw_event_count", "INTEGER");
+    addColumnIfMissing(db, "sessions", "tool_output_count", "INTEGER");
   }
   // Schema v7: LLM-classified columns on the heuristic tables.
   if (tableExists(db, "tool_errors")) {

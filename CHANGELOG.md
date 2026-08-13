@@ -3,6 +3,22 @@
 Notable Agentmine changes only. Keep this file short; detailed implementation notes belong in
 commit history and release notes.
 
+## 0.9.0 - 2026-08-13
+
+- Move verbatim source events and complete tool output into compressed sibling SQLite archives,
+  reducing the hot database to the data used by interactive queries. Existing corpora migrate only
+  through the explicit, space-checked, resumable `agentmine compact` command; routine commands do
+  not start the migration and refuse to open a pre-0.9 corpus until it is compacted.
+- Report corpus and extraction freshness on read commands instead of silently presenting stale
+  fact-derived results, and preserve child-command failures in the top-level `agentmine ingest`
+  receipt.
+- Narrow incremental extraction candidate scans to the affected sessions and move skill-listing
+  recovery to normalization, removing the full verbatim-payload scan from extraction.
+- Back up the hot database and every existing payload archive under one corpus lock, and make
+  payload purges resumable so interrupted maintenance cannot retain untracked private content.
+- Add a repeatable cold-import benchmark and verify compressed payload round-trips through the Bun
+  1.3.14 standalone runtime.
+
 ## 0.8.0 - 2026-08-04
 
 - Ingest Pi sessions from the append-only per-session JSONL store

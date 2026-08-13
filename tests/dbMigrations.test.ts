@@ -26,7 +26,7 @@ describe("Agentmine data migrations", () => {
     dirs.push(dir);
     const db = openDb({ path: join(dir, "sessions.db") });
     try {
-      expect(getMeta(db, "schema_version")).toBe("15");
+      expect(getMeta(db, "schema_version")).toBe("16");
       expect(getMeta(db, CODEX_LINEAGE_BACKFILL_META_KEY)).toBeUndefined();
       expect(getMeta(db, CODEX_TOKEN_USAGE_BACKFILL_META_KEY)).toBeUndefined();
     } finally {
@@ -85,7 +85,7 @@ describe("Agentmine data migrations", () => {
       expect(sessionIsUpToDate(migrated, "cc--root", "claude-hash")).toBe(true);
       expect(getMeta(migrated, CODEX_LINEAGE_BACKFILL_META_KEY)).toBe("1");
       expect(getMeta(migrated, CODEX_TOKEN_USAGE_BACKFILL_META_KEY)).toBe("1");
-      expect(getMeta(migrated, "schema_version")).toBe("15");
+      expect(getMeta(migrated, "schema_version")).toBe("16");
     } finally {
       migrated.close();
     }
@@ -130,7 +130,7 @@ describe("Agentmine data migrations", () => {
         getMeta(migrated, CODEX_LINEAGE_BACKFILL_META_KEY),
       ).toBeUndefined();
       expect(getMeta(migrated, CODEX_TOKEN_USAGE_BACKFILL_META_KEY)).toBe("1");
-      expect(getMeta(migrated, "schema_version")).toBe("15");
+      expect(getMeta(migrated, "schema_version")).toBe("16");
     } finally {
       migrated.close();
     }
@@ -161,7 +161,7 @@ describe("Agentmine data migrations", () => {
           .get(),
       ).toEqual({ content_hash: null, input_tokens: null });
       expect(getMeta(migrated, CODEX_TOKEN_USAGE_BACKFILL_META_KEY)).toBe("1");
-      expect(getMeta(migrated, "schema_version")).toBe("15");
+      expect(getMeta(migrated, "schema_version")).toBe("16");
     } finally {
       migrated.close();
     }
@@ -175,15 +175,15 @@ describe("Agentmine data migrations", () => {
     future.exec(`
       PRAGMA journal_mode = DELETE;
       CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-      INSERT INTO meta (key, value) VALUES ('schema_version', '16');
+      INSERT INTO meta (key, value) VALUES ('schema_version', '17');
     `);
     future.close();
 
     expect(() => openDb({ readonly: true, init: false, path: dbPath })).toThrow(
-      /schema version 16 is newer/u,
+      /schema version 17 is newer/u,
     );
     expect(() => openDb({ path: dbPath })).toThrow(
-      /schema version 16 is newer/u,
+      /schema version 17 is newer/u,
     );
 
     const check = new DatabaseSync(dbPath, { readOnly: true });
@@ -191,7 +191,7 @@ describe("Agentmine data migrations", () => {
       check
         .prepare(`SELECT value FROM meta WHERE key = 'schema_version'`)
         .get(),
-    ).toEqual({ value: "16" });
+    ).toEqual({ value: "17" });
     expect(check.prepare(`PRAGMA journal_mode`).get()).toEqual({
       journal_mode: "delete",
     });

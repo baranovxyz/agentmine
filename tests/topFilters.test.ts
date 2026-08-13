@@ -13,7 +13,7 @@ import {
   openDb,
   upsertMeta,
 } from "../src/db/client.js";
-import { upsertSession } from "../src/db/writer.js";
+import { upsertSessionWithPayload } from "../src/db/writer.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -114,8 +114,14 @@ describe("agentmine top skills --since/--until", () => {
     const apr1 = Math.floor(Date.parse("2026-04-01T12:00:00Z") / 1000);
     const today = Math.floor(Date.now() / 1000);
 
-    upsertSession(db, makeSession({ id: "old-session", startedAt: apr1 }));
-    upsertSession(db, makeSession({ id: "new-session", startedAt: today }));
+    upsertSessionWithPayload(
+      db,
+      makeSession({ id: "old-session", startedAt: apr1 }),
+    );
+    upsertSessionWithPayload(
+      db,
+      makeSession({ id: "new-session", startedAt: today }),
+    );
 
     db.prepare(
       `INSERT INTO skills_invoked (session_id, turn, idx, skill_name) VALUES (?, ?, ?, ?)`,
@@ -207,8 +213,14 @@ describe("agentmine top subagents --since/--until", () => {
     const apr1 = Math.floor(Date.parse("2026-04-01T12:00:00Z") / 1000);
     const today = Math.floor(Date.now() / 1000);
 
-    upsertSession(db, makeSession({ id: "old-parent", startedAt: apr1 }));
-    upsertSession(db, makeSession({ id: "new-parent", startedAt: today }));
+    upsertSessionWithPayload(
+      db,
+      makeSession({ id: "old-parent", startedAt: apr1 }),
+    );
+    upsertSessionWithPayload(
+      db,
+      makeSession({ id: "new-parent", startedAt: today }),
+    );
 
     db.prepare(
       `INSERT INTO subagent_invocations
@@ -255,15 +267,15 @@ describe("agentmine top sequences --project", () => {
     // Two sessions in /home/me/repo with a repeating Edit→Bash→Edit sequence
     // (3 occurrences each); one session in /home/me/other with a different
     // sequence that must not leak into repo-scoped results.
-    upsertSession(
+    upsertSessionWithPayload(
       db,
       makeSession({ id: "repo-a", projectPath: "/home/me/repo" }),
     );
-    upsertSession(
+    upsertSessionWithPayload(
       db,
       makeSession({ id: "repo-b", projectPath: "/home/me/repo/.worktrees/x" }),
     );
-    upsertSession(
+    upsertSessionWithPayload(
       db,
       makeSession({ id: "other", projectPath: "/home/me/other" }),
     );
@@ -354,7 +366,7 @@ describe("agentmine top tokens", () => {
     const apr1 = Math.floor(Date.parse("2026-04-01T12:00:00Z") / 1000);
     const may15 = Math.floor(Date.parse("2026-05-15T12:00:00Z") / 1000);
 
-    upsertSession(
+    upsertSessionWithPayload(
       db,
       makeSession({
         id: "s-opus",
@@ -367,7 +379,7 @@ describe("agentmine top tokens", () => {
         cacheCreationTokens: 1000,
       }),
     );
-    upsertSession(
+    upsertSessionWithPayload(
       db,
       makeSession({
         id: "s-haiku",
@@ -378,7 +390,7 @@ describe("agentmine top tokens", () => {
         outputTokens: 100,
       }),
     );
-    upsertSession(
+    upsertSessionWithPayload(
       db,
       makeSession({
         id: "s-gpt",
@@ -465,7 +477,7 @@ describe("agentmine top tokens", () => {
     "prices cached Codex input once while preserving disjoint source counters",
     async () => {
       const db = openDb({ path: dbPath });
-      upsertSession(
+      upsertSessionWithPayload(
         db,
         makeSession({
           id: "s-codex-cache",
@@ -477,7 +489,7 @@ describe("agentmine top tokens", () => {
           cacheCreationTokens: 100_000,
         }),
       );
-      upsertSession(
+      upsertSessionWithPayload(
         db,
         makeSession({
           id: "s-cline-cache",
@@ -489,7 +501,7 @@ describe("agentmine top tokens", () => {
           cacheCreationTokens: 100_000,
         }),
       );
-      upsertSession(
+      upsertSessionWithPayload(
         db,
         makeSession({
           id: "s-qwen-cache",
@@ -500,7 +512,7 @@ describe("agentmine top tokens", () => {
           cacheReadTokens: 700_000,
         }),
       );
-      upsertSession(
+      upsertSessionWithPayload(
         db,
         makeSession({
           id: "s-disjoint-cache",
@@ -512,7 +524,7 @@ describe("agentmine top tokens", () => {
           cacheCreationTokens: 100_000,
         }),
       );
-      upsertSession(
+      upsertSessionWithPayload(
         db,
         makeSession({
           id: "s-gemini-cache",
@@ -568,7 +580,7 @@ describe("agentmine top tokens", () => {
     "prices source-aware reasoning once and discloses unknown overlap semantics",
     async () => {
       const db = openDb({ path: dbPath });
-      upsertSession(
+      upsertSessionWithPayload(
         db,
         makeSession({
           id: "s-codex-reasoning-only",
@@ -577,7 +589,7 @@ describe("agentmine top tokens", () => {
           reasoningTokens: 100_000,
         }),
       );
-      upsertSession(
+      upsertSessionWithPayload(
         db,
         makeSession({
           id: "s-gemini-reasoning",
@@ -587,7 +599,7 @@ describe("agentmine top tokens", () => {
           reasoningTokens: 50_000,
         }),
       );
-      upsertSession(
+      upsertSessionWithPayload(
         db,
         makeSession({
           id: "s-custom-ambiguous",
@@ -653,7 +665,7 @@ describe("agentmine top tokens", () => {
     "includes cache-only partial sessions and prices their available category",
     async () => {
       const db = openDb({ path: dbPath });
-      upsertSession(
+      upsertSessionWithPayload(
         db,
         makeSession({
           id: "s-cache-only",
@@ -697,7 +709,7 @@ describe("agentmine top tokens", () => {
     "refuses token costs while the schema-v15 Codex backfill is pending",
     async () => {
       const db = openDb({ path: dbPath });
-      upsertSession(
+      upsertSessionWithPayload(
         db,
         makeSession({
           id: "s-stale-codex",
@@ -746,7 +758,7 @@ describe("agentmine top tokens", () => {
 
   it("refuses malformed persisted token counters instead of returning negative cost", async () => {
     const db = openDb({ path: dbPath });
-    upsertSession(
+    upsertSessionWithPayload(
       db,
       makeSession({
         id: "s-negative-usage",
@@ -778,7 +790,7 @@ describe("agentmine top tokens", () => {
 
   it("scopes malformed-counter validation to rows included in the grouping", async () => {
     const db = openDb({ path: dbPath });
-    upsertSession(
+    upsertSessionWithPayload(
       db,
       makeSession({
         id: "s-negative-without-model",
@@ -803,7 +815,7 @@ describe("agentmine top tokens", () => {
 
   it("refuses stale Codex costs when schema metadata is only partially numeric", async () => {
     const db = openDb({ path: dbPath });
-    upsertSession(
+    upsertSessionWithPayload(
       db,
       makeSession({
         id: "s-invalid-schema-version",
@@ -833,7 +845,7 @@ describe("agentmine top tokens", () => {
 
   it("refuses a future corpus schema without changing it", async () => {
     const db = openDb({ path: dbPath });
-    upsertMeta(db, "schema_version", "16");
+    upsertMeta(db, "schema_version", "17");
     db.close();
 
     const { exitCode, stdout } = await runCli(
@@ -846,7 +858,7 @@ describe("agentmine top tokens", () => {
       errors: [
         {
           name: "DB_ERROR",
-          message: expect.stringContaining("schema version 16 is newer"),
+          message: expect.stringContaining("schema version 17 is newer"),
         },
       ],
     });
@@ -856,7 +868,7 @@ describe("agentmine top tokens", () => {
     "marks NULL price rows as incomplete instead of reporting a complete zero cost",
     async () => {
       const db = openDb({ path: dbPath });
-      upsertSession(
+      upsertSessionWithPayload(
         db,
         makeSession({
           id: "s-unpriced",
@@ -871,7 +883,7 @@ describe("agentmine top tokens", () => {
             cache_write_per_mtok, source)
          VALUES ('unknown-priced-model', NULL, NULL, NULL, NULL, 'snapshot')`,
       ).run();
-      upsertSession(
+      upsertSessionWithPayload(
         db,
         makeSession({
           id: "s-priced-top",
@@ -928,7 +940,7 @@ describe("agentmine top tokens", () => {
     "marks a session incomplete when one used token category lacks a price",
     async () => {
       const db = openDb({ path: dbPath });
-      upsertSession(
+      upsertSessionWithPayload(
         db,
         makeSession({
           id: "s-missing-cache-write-price",

@@ -31,6 +31,12 @@ When Claude Code is included, `normalize` also reads workflow manifests and jour
 source session tree into lossless workflow tables. `extract` derives run, phase, and agent
 rollups for `agentmine workflows` and `agentmine workflow <run-id>`.
 
+`normalize` marks every changed session and raw workflow for extraction. `agentmine stats` exposes
+those pending signals as `data.freshness`; `query` and fact-backed browse commands add an
+`EXTRACTION_PENDING` warning until `agentmine extract` clears them. The warning keeps reads
+non-mutating while preventing a recent normalized date from being mistaken for complete derived
+facts.
+
 ## Safe to rerun
 
 The pipeline is designed to be safe to rerun:
@@ -40,8 +46,8 @@ The pipeline is designed to be safe to rerun:
   (content-hash caching — unchanged files are not re-parsed).
 - `extract` rebuilds derived fact tables in transactions, so a partial failure does not leave
   half-written tables.
-- `backup` snapshots `sessions.db` before risky rebuilds (for example, before `normalize --force`
-  or a schema rebuild).
+- `backup` snapshots the hot database and every existing payload archive before risky rebuilds
+  (for example, before `normalize --force` or a schema rebuild).
 
 ## No LLM in the default path
 

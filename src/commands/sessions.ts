@@ -2,6 +2,10 @@ import { defineCommand } from "citty";
 import { Errors } from "../contract/errors.js";
 import { type CommandOutcome, runCommand } from "../contract/result.js";
 import { dbExists, openDb } from "../db/client.js";
+import {
+  extractionPendingWarnings,
+  readWithFreshnessSnapshot,
+} from "../db/freshness.js";
 import { parseSince } from "./_filters.js";
 
 type Data = Record<string, unknown>;
@@ -128,22 +132,27 @@ export const sessionsCommand = defineCommand({
             : "";
           params.push(limit);
 
-          const rows = db
-            .prepare<unknown[], Record<string, unknown>>(
-              `SELECT id, source, project_path, git_branch, title,
-                      started_at, ended_at, first_user_prompt,
-                      turn_count, user_turn_count, assistant_turn_count,
-                      tool_call_count, tool_error_count,
-                      parent_session_id, agent_type,
-                      has_subagents, subagent_count
-                 FROM sessions
-                 ${whereSql}
-                 ORDER BY started_at DESC, id
-                 LIMIT ?`,
-            )
-            .all(...params)
-            .map(enrichSessionRow);
-          return { data: { rows, limit } };
+          const snapshot = readWithFreshnessSnapshot(db, () =>
+            db
+              .prepare<unknown[], Record<string, unknown>>(
+                `SELECT id, source, project_path, git_branch, title,
+                        started_at, ended_at, first_user_prompt,
+                        turn_count, user_turn_count, assistant_turn_count,
+                        tool_call_count, tool_error_count,
+                        parent_session_id, agent_type,
+                        has_subagents, subagent_count
+                   FROM sessions
+                   ${whereSql}
+                   ORDER BY started_at DESC, id
+                   LIMIT ?`,
+              )
+              .all(...params)
+              .map(enrichSessionRow),
+          );
+          return {
+            data: { rows: snapshot.value, limit },
+            warnings: extractionPendingWarnings(snapshot.freshness),
+          };
         } finally {
           db.close();
         }

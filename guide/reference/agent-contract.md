@@ -40,6 +40,20 @@ monitored line-by-line.
 An extension that fails during startup may also emit an unstructured diagnostic on stderr before
 the final envelope. Callers should treat only JSON objects with a progress-event shape as progress.
 
+## Corpus freshness warnings
+
+`agentmine stats` returns a `data.freshness` snapshot for the boundary between normalized inputs
+and extract-owned facts. Pending sessions and changed raw workflows are tracked independently.
+When either still needs extraction, `stats`, `query`, and fact-backed browse commands add an
+`EXTRACTION_PENDING` warning to the normal success envelope.
+
+This includes `sessions` and the default JSON form of `session`, whose payloads expose derived
+commit and subagent fields. `session --md` renders only normalized transcript data and does not add
+the warning.
+
+The warning does not change the result rows, exit code, or status. Treat derived fact results as
+incomplete until `agentmine extract` succeeds; normalized-session commands can still be used.
+
 ## Schema discovery
 
 Run `agentmine schema` to inspect the result-envelope schema, exit codes, and top-level command

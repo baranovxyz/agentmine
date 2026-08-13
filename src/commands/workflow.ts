@@ -2,6 +2,10 @@ import { defineCommand } from "citty";
 import { Errors } from "../contract/errors.js";
 import { type CommandOutcome, runCommand } from "../contract/result.js";
 import { dbExists, openDb } from "../db/client.js";
+import {
+  extractionPendingWarnings,
+  readWithFreshnessSnapshot,
+} from "../db/freshness.js";
 
 type Data = Record<string, unknown>;
 type Outcome = CommandOutcome<Data>;
@@ -41,33 +45,40 @@ export const workflowCommand = defineCommand({
 
         const db = openDb({ readonly: true });
         try {
-          const run = db
-            .prepare<[string], Record<string, unknown>>(
-              `SELECT w.*, s.project_path, s.git_branch
-                 FROM workflow_runs w
-                 LEFT JOIN sessions s ON s.id = w.orchestrating_session_id
-                WHERE w.run_id = ?`,
-            )
-            .get(runId);
-          if (!run) throw Errors.notFound(`Workflow run ${runId} not found`);
+          const {
+            value: { run, phases, agents },
+            freshness,
+          } = readWithFreshnessSnapshot(db, () => {
+            const run = db
+              .prepare<[string], Record<string, unknown>>(
+                `SELECT w.*, s.project_path, s.git_branch
+                   FROM workflow_runs w
+                   LEFT JOIN sessions s ON s.id = w.orchestrating_session_id
+                  WHERE w.run_id = ?`,
+              )
+              .get(runId);
+            if (!run) throw Errors.notFound(`Workflow run ${runId} not found`);
 
-          const phases = db
-            .prepare<[string], Record<string, unknown>>(
-              `SELECT phase_index, title, detail
-                 FROM workflow_run_phases WHERE run_id = ? ORDER BY phase_index`,
-            )
-            .all(runId);
+            const phases = db
+              .prepare<[string], Record<string, unknown>>(
+                `SELECT phase_index, title, detail
+                   FROM workflow_run_phases WHERE run_id = ? ORDER BY phase_index`,
+              )
+              .all(runId);
 
-          const agents = db
-            .prepare<[string], Record<string, unknown>>(
-              `SELECT run_id, agent_id, agent_session_id, phase_index, phase_title,
-                      label, model, state, attempt, tokens, tool_calls,
-                      duration_ms, started_at, result_preview, result_full
-                 FROM workflow_agents WHERE run_id = ?
-                ORDER BY phase_index, started_at, agent_id`,
-            )
-            .all(runId)
-            .map(enrichAgentRow);
+            const agents = db
+              .prepare<[string], Record<string, unknown>>(
+                `SELECT run_id, agent_id, agent_session_id, phase_index, phase_title,
+                        label, model, state, attempt, tokens, tool_calls,
+                        duration_ms, started_at, result_preview, result_full
+                   FROM workflow_agents WHERE run_id = ?
+                  ORDER BY phase_index, started_at, agent_id`,
+              )
+              .all(runId)
+              .map(enrichAgentRow);
+
+            return { run, phases, agents };
+          });
 
           return {
             data: {
@@ -75,6 +86,7 @@ export const workflowCommand = defineCommand({
               phases,
               agents,
             },
+            warnings: extractionPendingWarnings(freshness),
           };
         } finally {
           db.close();

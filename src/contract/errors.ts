@@ -90,6 +90,17 @@ export const Errors = {
       retryable: false,
     });
   },
+  compactionRequired(dbPath: string): CliError {
+    return new CliError({
+      code: 1005,
+      name: "COMPACTION_REQUIRED",
+      message:
+        "This corpus uses the pre-0.9 storage layout. Run `agentmine compact --dry-run`, then `agentmine compact` before any other corpus command.",
+      category: "user",
+      retryable: false,
+      path: dbPath,
+    });
+  },
   ioError(message: string, path?: string): CliError {
     return new CliError({
       code: 2001,

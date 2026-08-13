@@ -3,6 +3,11 @@ import { Errors } from "../contract/errors.js";
 import { reportProgressImmediate } from "../contract/progress.js";
 import { runCommand } from "../contract/result.js";
 import { dbExists, getMeta, openDb, upsertMeta } from "../db/client.js";
+import {
+  clearWorkflowExtractionPending,
+  recordExtractSuccess,
+  workflowExtractionIsPending,
+} from "../db/freshness.js";
 import { withWriteLock } from "../db/lock.js";
 import {
   clearAllDirtySessions,
@@ -10,6 +15,7 @@ import {
   getDirtySessions,
 } from "../db/writer.js";
 import { runAllExtractors } from "../extract/index.js";
+import { extractWorkflowRuns } from "../extract/workflows.js";
 
 /**
  * Marker set after any full rebuild. Its absence means the corpus predates
@@ -53,12 +59,16 @@ export const extractCommand = defineCommand({
               if (full) {
                 const counts = runAllExtractors(db, null);
                 clearAllDirtySessions(db);
+                clearWorkflowExtractionPending(db);
                 upsertMeta(db, EXTRACT_READY_META_KEY, "1");
+                recordExtractSuccess(db);
                 return { counts, scope: "full" as const, sessions_scoped: 0 };
               }
 
               const dirty = getDirtySessions(db);
-              if (dirty.length === 0) {
+              const workflowPending = workflowExtractionIsPending(db);
+              if (dirty.length === 0 && !workflowPending) {
+                recordExtractSuccess(db);
                 return {
                   counts: null,
                   scope: "incremental" as const,
@@ -66,8 +76,21 @@ export const extractCommand = defineCommand({
                 };
               }
 
+              if (dirty.length === 0) {
+                const workflow_runs = extractWorkflowRuns(db);
+                clearWorkflowExtractionPending(db);
+                recordExtractSuccess(db);
+                return {
+                  counts: { workflow_runs },
+                  scope: "incremental" as const,
+                  sessions_scoped: 0,
+                };
+              }
+
               const counts = runAllExtractors(db, dirty);
               clearDirtySessions(db, dirty);
+              clearWorkflowExtractionPending(db);
+              recordExtractSuccess(db);
               return {
                 counts,
                 scope: "incremental" as const,

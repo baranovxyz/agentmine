@@ -13,7 +13,7 @@ import { extractSearchCalls } from "./search.js";
 import { extractSelfResolutions } from "./selfResolutions.js";
 import { extractShellCommands } from "./shell.js";
 import { extractSkillsInvoked } from "./skills.js";
-import { extractSkillsAvailable } from "./skillsAvailable.js";
+import { countSkillsAvailable } from "./skillsAvailable.js";
 import { extractSkillsHookInjected } from "./skillsHookInjected.js";
 import { extractSubagentInvocations } from "./subagents.js";
 import { extractPromptTemplates } from "./templates.js";
@@ -72,7 +72,8 @@ function runExtractors(db: DatabaseType, scope: ExtractScope): ExtractorResult {
   const shell_commands = extractShellCommands(db, scope);
   const tool_errors = extractToolErrors(db, scope);
   const skills_invoked = extractSkillsInvoked(db, scope);
-  const skills_available = extractSkillsAvailable(db, scope);
+  // Written by normalize, not here; reported for receipt stability.
+  const skills_available = countSkillsAvailable(db, scope);
   const skills_hook_injected = extractSkillsHookInjected(db, scope);
   const mcp_calls = extractMcpCalls(db, scope);
   const web_fetches = extractWebFetches(db, scope);

@@ -116,11 +116,21 @@ export const schemaCommand = defineCommand({
             },
             backup: {
               description:
-                "Create a consistent SQLite backup archive under the app-data sessions backup directory or --output",
+                "Create a consistent backup of the hot database and every existing payload archive under the app-data sessions backup directory or --output",
               annotations: {
                 readOnlyHint: false,
                 destructiveHint: false,
                 idempotentHint: false,
+              },
+            },
+            compact: {
+              description:
+                "Relocate verbatim session payload out of sessions.db into sibling archive databases and reclaim the freed space; resumable and refuses to start without enough free disk",
+              annotations: {
+                readOnlyHint: false,
+                // Payload is moved, never dropped, and re-running is safe.
+                destructiveHint: false,
+                idempotentHint: true,
               },
             },
             sync: {

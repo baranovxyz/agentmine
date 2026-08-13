@@ -2,6 +2,10 @@ import { defineCommand } from "citty";
 import { Errors } from "../contract/errors.js";
 import { runCommand } from "../contract/result.js";
 import { dbExists, openDb } from "../db/client.js";
+import {
+  extractionPendingWarnings,
+  readWithFreshnessSnapshot,
+} from "../db/freshness.js";
 
 export const queryCommand = defineCommand({
   meta: {
@@ -37,7 +41,10 @@ export const queryCommand = defineCommand({
         const db = openDb({ readonly: true });
         try {
           const stmt = db.prepare(sql);
-          const rows = stmt.all() as unknown[];
+          const { value: rows, freshness } = readWithFreshnessSnapshot(
+            db,
+            () => stmt.all() as unknown[],
+          );
           const capped = rows.length > limit;
           return {
             data: {
@@ -46,6 +53,7 @@ export const queryCommand = defineCommand({
               limit,
               rows: capped ? rows.slice(0, limit) : rows,
             },
+            warnings: extractionPendingWarnings(freshness),
           };
         } catch (e) {
           throw Errors.invalidInput(`SQL error: ${(e as Error).message}`);

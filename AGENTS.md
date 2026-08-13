@@ -20,6 +20,7 @@ pnpm test:artifact                 # build, pack, and load the npm artifact
 pnpm typecheck                     # strict TS
 pnpm lint                          # tsc --noEmit + biome check (format + lint)
 pnpm lint:fix                      # biome check --write (auto-format + safe fixes)
+pnpm --silent benchmark:cold-import # local cold-normalize harness; flags: ARCHITECTURE.md
 
 node dist/cli.js stats             # corpus overview
 node dist/cli.js sessions --root-only --since 1d # list top-level sessions, excluding child workers/reviewers
@@ -31,7 +32,9 @@ node dist/cli.js session <id> --turn-range 10:20 # inspect a compact slice
 node dist/cli.js schema            # inspect envelope schema, exit codes, and command registry
 node dist/cli.js schema --tables   # list database tables and views
 node dist/cli.js schema --table messages # inspect one table before writing SQL
-node dist/cli.js backup            # snapshot sessions.db before normalize --force / rebuilds
+node dist/cli.js backup            # snapshot the complete SQLite corpus before forced rebuilds
+node dist/cli.js compact --dry-run # plan the payload-archive migration + free-space check
+node dist/cli.js compact           # move payload to sibling archives and reclaim space (resumable)
 node dist/cli.js top sequences --project '/home/me/repo%' --n 3 # re-aggregate ngrams scoped to a project_path LIKE pattern
 node dist/cli.js prices sync         # load model_prices from the vendored LiteLLM snapshot (offline); --online fetches live LiteLLM
 node dist/cli.js prices ls            # list the loaded price table (USD per 1M tokens)
@@ -67,26 +70,47 @@ node dist/cli.js workflow <run_id>    # one run: rollups, ordered phases, per-ag
   First mention should be **Agentmine** (`agentmine`).
 - **DB writes are explicit CLI operations.** `agentmine query` opens with
   SQLite `readonly` flag; only `SELECT`, `WITH`, `EXPLAIN` accepted.
-  Commands that write (`sync`, `normalize`, `extract`, `ingest`, `embed`) must be
-  idempotent and emit JSON receipts. `embed --dry-run` must not write
-  chunks, vectors, or run receipts.
-- **Write commands serialize across processes.** `normalize`, `extract`, and
-  `embed` wrap their write phase in `withWriteLock` (`src/db/lock.ts`), an
-  advisory lock at `${db}.lock`, so a SessionStart hook's `normalize` racing a
-  scheduled `ingest` (separate processes) can't clobber each other or hit
-  `SQLITE_BUSY_SNAPSHOT`. A held lock waits up to `$AGENTMINE_LOCK_TIMEOUT_MS`
-  (default 60s) then fails with a retryable `LOCKED`; a stale lock is reclaimed
-  only when its PID is dead on this host. `--dry-run` writes nothing, so it skips
-  the lock. Any new write path must go through `withWriteLock`.
+  Commands that mutate local state must be idempotent and emit JSON receipts.
+  `embed --dry-run` must not write chunks, vectors, or run receipts.
+- **Corpus operations serialize across processes.** Corpus mutations (`normalize`,
+  `extract`, `embed`, `prices sync`, `compact`, and `purge --yes`) and the
+  consistency-sensitive `backup` command use `withWriteLock` (`src/db/lock.ts`),
+  an advisory lock at `${db}.lock`. A held lock waits up to
+  `$AGENTMINE_LOCK_TIMEOUT_MS` (default 60s) then fails with a retryable `LOCKED`;
+  a stale lock is reclaimed only when its PID is dead on this host. Dry-run paths
+  write nothing and skip the lock. Any new corpus write path must use the lock.
 - **Schema drift is forbidden.** `src/db/schema.sql` is canonical;
   `src/db/schemaText.ts` is its bundled copy. Edit both, in the same
   commit. If the change is breaking, bump `SCHEMA_VERSION` in
   `src/db/client.ts`.
 - **Lossless ingest is intentional.** Adapters should preserve raw source
-  events in `raw_events` and full untruncated tool output in
-  `tool_outputs` when the source provides it. Keep previews in
-  `tool_calls` bounded for browsing, but do not throw away analyzable raw
-  data during normalize.
+  events and full untruncated tool output when the source provides it. Keep
+  previews in `tool_calls` bounded for browsing, but do not throw away
+  analyzable raw data during normalize.
+- **Cold payload lives in sibling archives, not `sessions.db`.** `raw_events` and
+  `tool_outputs` are in `sessions-raw.db` / `sessions-tools.db`, stored
+  zstd-compressed as BLOBs, attached on demand via `db/archives.ts` and read
+  through `decodePayload`. Rules that follow from that:
+  - **Never assume one database.** A command that needs payload must
+    `attachArchive`; a command that does not must never attach, so its cost
+    stays bounded by the hot database. `stats` reads payload totals from the
+    `sessions.raw_event_count` / `tool_output_count` counters instead.
+  - **Payload is not SQL-searchable.** It is compressed binary, so `LIKE` and
+    `json_extract` no longer reach it. Recover anything you need from parsed
+    events at normalize time (as `writeSkillsAvailable` does) rather than by
+    scanning payload later.
+  - **Pre-0.9 corpora fail closed.** The common `openDb` gate rejects the
+    single-database payload layout for every normal corpus command. Only
+    discovery that does not open a corpus plus `backup` and `compact` may run
+    before the explicit migration. Filesystem-only workflows such as `sync`
+    and `ingest` call `assertConfiguredCorpusReady` before their first write.
+  - **Write cold-first.** Cross-database transactions are NOT atomic under
+    WAL. `writeSessionPayload` must commit before `upsertSession`; deletes go
+    hot-first. Orphaned archive rows are valid and self-heal; a hot row with
+    missing payload is not. Single-session callers should use
+    `upsertSessionWithPayload`, which orders both phases correctly.
+  - `agentmine compact` migrates a pre-split corpus. `normalize` refuses to
+    run until it has.
 - **agent-canonical parser style is the adapter contract.** Per-CLI
   format knowledge lives in the `agent-canonical` package
   (`src/parsers/<cli>/`), not in Agentmine. New or changed codecs should follow the layered
@@ -106,6 +130,12 @@ node dist/cli.js workflow <run_id>    # one run: rollups, ordered phases, per-ag
   extractors (subagents/ngrams/templates + the subagent-count rollup) ignore
   the scope and always rebuild — keep them cheap. Re-running `extract` on an
   unchanged corpus must be a no-op.
+- **Fact freshness is explicit.** `dirty_sessions` plus the durable workflow
+  pending marker are authoritative for whether normalized inputs still need
+  extraction. Any browse command or mode that reads extract-owned fact or
+  pattern tables, or exposes extract-maintained fields, must reuse
+  `db/freshness.ts` and emit its `EXTRACTION_PENDING` warning; never infer
+  freshness from content dates or silently run a writer from a read command.
 - **Normalize is content-hash cached, with a stat pre-filter.** The
   content hash (`sessionIsUpToDate`) is the source of truth for "did this
   session change". On top of it, `file_stat_cache` records each file's
@@ -178,9 +208,10 @@ node dist/cli.js workflow <run_id>    # one run: rollups, ordered phases, per-ag
 
 ## Don'ts
 
-- Don't write to `sessions.db` from any code path other than
-  `db/writer.ts`. Even one-off scripts must go through it or use a
-  separate file.
+- Don't write canonical session, message, or tool-call rows outside
+  `db/writer.ts`. Maintenance and derived-data commands may write only the
+  tables they own, under `withWriteLock`, while preserving the archive ordering
+  above. One-off scripts must use the same boundaries or a separate file.
 - Don't add commands that emit non-JSON to stdout. Pretty output is
   optional and only when stdout is a TTY.
 - Don't document real local archive names, host suffixes, usernames, or
@@ -201,6 +232,6 @@ node dist/cli.js workflow <run_id>    # one run: rollups, ordered phases, per-ag
   omitting the newer table: e.g. `skills_available` stays at 0 rows and
   is absent from the receipt, with no error. If any fact table is
   unexpectedly empty, `pnpm build` then re-run `extract` before
-  trusting a count. (`skills_available` is extract-derived from
-  `raw_events` skill listings, so it needs `extract`, not just
-  `normalize`.)
+  trusting a count. (`skills_available` is the exception: it is written by
+  `normalize` from parsed events, not by `extract`, so `extract` only reports
+  its row count.)

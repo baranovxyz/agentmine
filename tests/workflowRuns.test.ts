@@ -6,7 +6,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import type { CanonicalSession } from "../src/adapters/types.js";
 import { type DatabaseType, openDb } from "../src/db/client.js";
 import {
-  upsertSession,
+  upsertSessionWithPayload,
   upsertWorkflowRunRaw,
   type WorkflowJournalLineRaw,
 } from "../src/db/writer.js";
@@ -222,8 +222,8 @@ describe("workflow-run ingest", () => {
     expect(a?.agent_session_id).toBeNull();
 
     // Ingest the orchestrating + agent sessions, then re-derive.
-    upsertSession(db, makeSession({ id: "cc--sess-orch" }));
-    upsertSession(db, makeSession({ id: "cc--aAAA" }));
+    upsertSessionWithPayload(db, makeSession({ id: "cc--sess-orch" }));
+    upsertSessionWithPayload(db, makeSession({ id: "cc--aAAA" }));
     extractWorkflowRuns(db);
 
     a = db
@@ -260,8 +260,8 @@ describe("workflow-run ingest", () => {
       id: "cc--child",
       parentSessionId: "cc--parent",
     });
-    upsertSession(db, parent);
-    upsertSession(db, child);
+    upsertSessionWithPayload(db, parent);
+    upsertSessionWithPayload(db, child);
     runAllExtractors(db);
     const row = db
       .prepare<[string], { has_subagents: number; subagent_count: number }>(

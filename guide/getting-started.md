@@ -50,6 +50,18 @@ agentmine version
 The first command prints only the semantic version. The second emits a JSON envelope with the
 runtime, target, runtime version, and public source commit when available.
 
+When upgrading an existing 0.8.x corpus, inspect and apply the one-time storage split before any
+normal corpus command:
+
+```bash
+agentmine compact --dry-run
+agentmine compact
+```
+
+The migration is resumable and checks available disk space before writing. Agentmine 0.9 refuses
+normal corpus commands until it completes; `agentmine backup` remains available as the recovery
+step before migration.
+
 ## Quick start
 
 Choose the source you have installed:
@@ -96,8 +108,8 @@ For Cline, the source directory follows Cline's own override precedence:
 `~/.factory/sessions`, and Mistral Vibe reads `~/.vibe/logs/session`. See
 [Data paths](reference/data-paths.md) for details.
 
-After the first import creates `sessions.db`, run `agentmine backup` before forced rebuilds or
-other destructive maintenance.
+After the first import creates the corpus, run `agentmine backup` before forced rebuilds or other
+destructive maintenance. The backup includes `sessions.db` and every existing payload archive.
 
 When Claude Code is in scope, `normalize` also ingests its workflow manifests and journals.
 `extract` then derives workflow rollups that you can browse with:
