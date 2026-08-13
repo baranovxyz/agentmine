@@ -4,8 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import type { CanonicalSession } from "../src/adapters/types.js";
+import { archiveAlias } from "../src/db/archives.js";
 import { openDb } from "../src/db/client.js";
-import { upsertSession } from "../src/db/writer.js";
+import { decodePayload } from "../src/db/payloadCodec.js";
+import { upsertSessionWithPayload } from "../src/db/writer.js";
 import { classify } from "../src/extract/corrections.js";
 import { runAllExtractors } from "../src/extract/index.js";
 
@@ -69,7 +71,7 @@ describe("user_corrections injected-content filter", () => {
 
   it("skips runtime-injected user turns while retaining authored corrections", () => {
     const db = openDb({ path: dbPath });
-    upsertSession(
+    upsertSessionWithPayload(
       db,
       makeSession({
         id: "cc--noise-1",
@@ -119,7 +121,7 @@ describe("files / shell / errors extractors", () => {
 
   it("extracts files_touched from Read/Edit/Write tool calls", () => {
     const db = openDb({ path: dbPath });
-    upsertSession(
+    upsertSessionWithPayload(
       db,
       makeSession({
         messages: [
@@ -177,7 +179,7 @@ describe("files / shell / errors extractors", () => {
 
   it("extracts files_touched from lower snake-case file tool calls", () => {
     const db = openDb({ path: dbPath });
-    upsertSession(
+    upsertSessionWithPayload(
       db,
       makeSession({
         messages: [
@@ -226,7 +228,7 @@ describe("files / shell / errors extractors", () => {
 
   it("persists raw events and full tool outputs for normalized sessions", () => {
     const db = openDb({ path: dbPath });
-    upsertSession(
+    upsertSessionWithPayload(
       db,
       makeSession({
         rawEvents: [
@@ -261,17 +263,39 @@ describe("files / shell / errors extractors", () => {
         ],
       }),
     );
+    // Payload lives compressed in the sibling archives. Lossless
+    // ingest still holds: it decodes back to the exact source bytes.
     const raw = db
-      .prepare(`SELECT event_type, raw_json FROM raw_events ORDER BY seq`)
-      .all() as Array<{ event_type: string; raw_json: string }>;
+      .prepare<[], { event_type: string; payload: Uint8Array }>(
+        `SELECT event_type, payload FROM ${archiveAlias("raw")}.raw_events ORDER BY seq`,
+      )
+      .all()
+      .map((row) => ({
+        event_type: row.event_type,
+        raw_json: decodePayload(row.payload),
+      }));
     expect(raw).toEqual([
       { event_type: "user", raw_json: '{"type":"user"}' },
       { event_type: "assistant", raw_json: '{"type":"assistant"}' },
     ]);
-    const out = db.prepare(`SELECT output_text FROM tool_outputs`).get() as {
-      output_text: string;
-    };
-    expect(out.output_text).toContain("full untruncated output");
+    const out = db
+      .prepare<[], { payload: Uint8Array }>(
+        `SELECT payload FROM ${archiveAlias("tools")}.tool_outputs`,
+      )
+      .get();
+    expect(out).toBeDefined();
+    if (out) {
+      expect(decodePayload(out.payload)).toContain("full untruncated output");
+    }
+
+    // The hot database keeps counters so `stats` never has to open an archive.
+    const counts = db
+      .prepare<[], { raw_event_count: number; tool_output_count: number }>(
+        `SELECT raw_event_count, tool_output_count FROM sessions`,
+      )
+      .get();
+    expect(counts).toEqual({ raw_event_count: 2, tool_output_count: 1 });
+
     db.close();
     rmSync(dbPath, { force: true });
   });
@@ -286,7 +310,7 @@ describe("files / shell / errors extractors", () => {
       "@@\n-old\n+new\n" +
       "*** Delete File: /a/gone.ts\n" +
       "*** End Patch\n";
-    upsertSession(
+    upsertSessionWithPayload(
       db,
       makeSession({
         id: `cx--${randomUUID()}`,
@@ -325,7 +349,7 @@ describe("files / shell / errors extractors", () => {
 
   it("extracts files_touched from opencode patch file lists", () => {
     const db = openDb({ path: dbPath });
-    upsertSession(
+    upsertSessionWithPayload(
       db,
       makeSession({
         id: `oc--${randomUUID()}`,
@@ -367,7 +391,7 @@ describe("files / shell / errors extractors", () => {
 
   it("parses shell command head from Bash tool calls, strips wrappers", () => {
     const db = openDb({ path: dbPath });
-    upsertSession(
+    upsertSessionWithPayload(
       db,
       makeSession({
         messages: [
@@ -415,7 +439,7 @@ describe("files / shell / errors extractors", () => {
 
   it("parses shell command head from codex exec_command tool calls", () => {
     const db = openDb({ path: dbPath });
-    upsertSession(
+    upsertSessionWithPayload(
       db,
       makeSession({
         id: `cx--${randomUUID()}`,
@@ -458,7 +482,7 @@ describe("files / shell / errors extractors", () => {
 
   it("parses shell command head from execute_command tool calls", () => {
     const db = openDb({ path: dbPath });
-    upsertSession(
+    upsertSessionWithPayload(
       db,
       makeSession({
         messages: [
@@ -492,7 +516,7 @@ describe("files / shell / errors extractors", () => {
 
   it("extracts todo_events from CC TodoWrite, opencode todowrite, codex update_plan", () => {
     const db = openDb({ path: dbPath });
-    upsertSession(
+    upsertSessionWithPayload(
       db,
       makeSession({
         id: `cc--${randomUUID()}`,
@@ -520,7 +544,7 @@ describe("files / shell / errors extractors", () => {
         ],
       }),
     );
-    upsertSession(
+    upsertSessionWithPayload(
       db,
       makeSession({
         id: `oc--${randomUUID()}`,
@@ -543,7 +567,7 @@ describe("files / shell / errors extractors", () => {
         ],
       }),
     );
-    upsertSession(
+    upsertSessionWithPayload(
       db,
       makeSession({
         id: `cx--${randomUUID()}`,
@@ -596,7 +620,7 @@ describe("files / shell / errors extractors", () => {
 
   it("extracts search_calls from CC Grep + opencode grep/glob with patterns and paths", () => {
     const db = openDb({ path: dbPath });
-    upsertSession(
+    upsertSessionWithPayload(
       db,
       makeSession({
         id: `cc--${randomUUID()}`,
@@ -629,7 +653,7 @@ describe("files / shell / errors extractors", () => {
         ],
       }),
     );
-    upsertSession(
+    upsertSessionWithPayload(
       db,
       makeSession({
         id: `oc--${randomUUID()}`,
@@ -675,7 +699,7 @@ describe("files / shell / errors extractors", () => {
 
   it("extracts web_fetches search rows from codex web_search { queries }", () => {
     const db = openDb({ path: dbPath });
-    upsertSession(
+    upsertSessionWithPayload(
       db,
       makeSession({
         id: `cx--${randomUUID()}`,
@@ -711,7 +735,7 @@ describe("files / shell / errors extractors", () => {
 
   it("records tool_errors for non-zero exit tool calls with category", () => {
     const db = openDb({ path: dbPath });
-    upsertSession(
+    upsertSessionWithPayload(
       db,
       makeSession({
         messages: [
@@ -816,7 +840,7 @@ describe("files / shell / errors extractors", () => {
 
   it("records user_correction with preceding_turn + tool_calls count + followed_by_revert flag", () => {
     const db = openDb({ path: dbPath });
-    upsertSession(
+    upsertSessionWithPayload(
       db,
       makeSession({
         id: "cc--fix-revert",
@@ -906,7 +930,7 @@ describe("fact extractors", () => {
 
   it("skills_invoked: extracts slug from Skill tool args and from SKILL.md path Reads", () => {
     const db = openDb({ path: dbPath });
-    upsertSession(
+    upsertSessionWithPayload(
       db,
       makeSession({
         messages: [
@@ -956,7 +980,7 @@ describe("fact extractors", () => {
 
   it("mcp_calls: parses CallMcpTool args and mcp__server__tool / mcp_server_tool naming", () => {
     const db = openDb({ path: dbPath });
-    upsertSession(
+    upsertSessionWithPayload(
       db,
       makeSession({
         messages: [
@@ -1011,7 +1035,7 @@ describe("fact extractors", () => {
 
   it("web_fetches: classifies WebFetch / WebSearch / browser_navigate", () => {
     const db = openDb({ path: dbPath });
-    upsertSession(
+    upsertSessionWithPayload(
       db,
       makeSession({
         messages: [
@@ -1070,7 +1094,7 @@ describe("fact extractors", () => {
 
   it("git_operations: classifies common git subcommands and extracts branch/hash", () => {
     const db = openDb({ path: dbPath });
-    upsertSession(
+    upsertSessionWithPayload(
       db,
       makeSession({
         messages: [
@@ -1142,7 +1166,7 @@ describe("fact extractors", () => {
 
   it("todo_events: counts statuses from TodoWrite args.todos", () => {
     const db = openDb({ path: dbPath });
-    upsertSession(
+    upsertSessionWithPayload(
       db,
       makeSession({
         messages: [
@@ -1195,7 +1219,7 @@ describe("fact extractors", () => {
 
   it("user_interruptions: catches a fast short user turn after a busy assistant turn", () => {
     const db = openDb({ path: dbPath });
-    upsertSession(
+    upsertSessionWithPayload(
       db,
       makeSession({
         id: "cc--int-1",
@@ -1272,7 +1296,7 @@ describe("pattern extractors", () => {
     const db = openDb({ path: dbPath });
     // Three sessions each with the sequence Read → Edit → Bash.
     for (let i = 0; i < 3; i += 1) {
-      upsertSession(
+      upsertSessionWithPayload(
         db,
         makeSession({
           id: `cc--ng-${i}`,
@@ -1330,7 +1354,7 @@ describe("pattern extractors", () => {
   it("prompt_templates: groups normalized first-prompts with count >= 3", () => {
     const db = openDb({ path: dbPath });
     for (let i = 0; i < 3; i += 1) {
-      upsertSession(
+      upsertSessionWithPayload(
         db,
         makeSession({
           id: `cc--pt-${i}`,
@@ -1364,7 +1388,7 @@ describe("pattern extractors", () => {
     // these would group into a single high-count template and dominate
     // `top prompts`. With the filter they drop out entirely.
     for (let i = 0; i < 3; i += 1) {
-      upsertSession(
+      upsertSessionWithPayload(
         db,
         makeSession({
           id: `cc--noise-prompt-${i}`,
@@ -1394,7 +1418,7 @@ describe("pattern extractors", () => {
 
   it("friction_events: detects retry_same_cmd and tool_error_loop on synthetic data", () => {
     const db = openDb({ path: dbPath });
-    upsertSession(
+    upsertSessionWithPayload(
       db,
       makeSession({
         id: "cc--frict-1",
@@ -1445,7 +1469,7 @@ describe("pattern extractors", () => {
 
   it("self_resolutions: detects same args_hash failed-then-ok with no user turn between", () => {
     const db = openDb({ path: dbPath });
-    upsertSession(
+    upsertSessionWithPayload(
       db,
       makeSession({
         id: "cc--sr-1",
@@ -1552,7 +1576,7 @@ describe("pattern extractors", () => {
 
   it("self_resolutions: skips pairs where a user turn intervenes", () => {
     const db = openDb({ path: dbPath });
-    upsertSession(
+    upsertSessionWithPayload(
       db,
       makeSession({
         id: "cc--sr-2",
@@ -1604,7 +1628,7 @@ describe("pattern extractors", () => {
 
   it("subagent_invocations: one row per Task tool call; child linked when parent_session_id matches", () => {
     const db = openDb({ path: dbPath });
-    upsertSession(
+    upsertSessionWithPayload(
       db,
       makeSession({
         id: "cc--parent",
@@ -1630,7 +1654,7 @@ describe("pattern extractors", () => {
         ],
       }),
     );
-    upsertSession(
+    upsertSessionWithPayload(
       db,
       makeSession({
         id: "cc--child",
@@ -1669,7 +1693,7 @@ describe("pattern extractors", () => {
 
   it("subagent_invocations: also extracts from the newer Agent tool name", () => {
     const db = openDb({ path: dbPath });
-    upsertSession(
+    upsertSessionWithPayload(
       db,
       makeSession({
         id: "cc--parent-agent",
@@ -1724,7 +1748,7 @@ describe("pattern extractors", () => {
 
   it("subagent_invocations: links Codex spawn_agent by id, task path, then deterministic fallback", () => {
     const db = openDb({ path: dbPath });
-    upsertSession(
+    upsertSessionWithPayload(
       db,
       makeSession({
         id: "cx--parent",
@@ -1815,7 +1839,7 @@ describe("pattern extractors", () => {
         startedAt: 6,
       },
     ]) {
-      upsertSession(
+      upsertSessionWithPayload(
         db,
         makeSession({
           ...child,
@@ -1897,7 +1921,7 @@ describe("pattern extractors", () => {
 
   it("subagent_invocations: reserves a later exact child before fallback matching", () => {
     const db = openDb({ path: dbPath });
-    upsertSession(
+    upsertSessionWithPayload(
       db,
       makeSession({
         id: "cx--reservation-parent",
@@ -1928,7 +1952,7 @@ describe("pattern extractors", () => {
         ],
       }),
     );
-    upsertSession(
+    upsertSessionWithPayload(
       db,
       makeSession({
         id: "cx--reserved-child",
@@ -1940,7 +1964,7 @@ describe("pattern extractors", () => {
         contentHash: "reserved-child",
       }),
     );
-    upsertSession(
+    upsertSessionWithPayload(
       db,
       makeSession({
         id: "cx--reservation-guardian",
@@ -1971,7 +1995,7 @@ describe("pattern extractors", () => {
 
   it("subagent_invocations: a failed path dispatch cannot claim a later successful child", () => {
     const db = openDb({ path: dbPath });
-    upsertSession(
+    upsertSessionWithPayload(
       db,
       makeSession({
         id: "cx--path-retry-parent",
@@ -2002,7 +2026,7 @@ describe("pattern extractors", () => {
         ],
       }),
     );
-    upsertSession(
+    upsertSessionWithPayload(
       db,
       makeSession({
         id: "cx--path-retry-child",
@@ -2031,7 +2055,7 @@ describe("pattern extractors", () => {
 
   it("subagent_invocations: a non-Codex agent named guardian remains linkable", () => {
     const db = openDb({ path: dbPath });
-    upsertSession(
+    upsertSessionWithPayload(
       db,
       makeSession({
         id: "cc--guardian-parent",
@@ -2056,7 +2080,7 @@ describe("pattern extractors", () => {
         ],
       }),
     );
-    upsertSession(
+    upsertSessionWithPayload(
       db,
       makeSession({
         id: "cc--guardian-child",
@@ -2090,7 +2114,7 @@ describe("pattern extractors", () => {
 - superpowers:brainstorming: Explore before coding`,
       },
     };
-    upsertSession(
+    upsertSessionWithPayload(
       db,
       makeSession({
         id: "cc--skills-available",
@@ -2143,7 +2167,7 @@ describe("pattern extractors", () => {
         content: "- task-cli: Use task CLI",
       },
     };
-    upsertSession(
+    upsertSessionWithPayload(
       db,
       makeSession({
         id: "cc--skills-available-malformed",
@@ -2184,7 +2208,7 @@ describe("pattern extractors", () => {
 - simplify: Review diffs`,
       },
     };
-    upsertSession(
+    upsertSessionWithPayload(
       db,
       makeSession({
         id: "cc--skills-shelf",

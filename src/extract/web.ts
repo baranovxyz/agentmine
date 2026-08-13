@@ -1,5 +1,5 @@
 import type { DatabaseType } from "../db/client.js";
-import { type ExtractScope, scopedDelete, scopeWhere } from "./scope.js";
+import { type ExtractScope, scopeAnd, scopedDelete } from "./scope.js";
 
 /**
  * web_fetches: one row per WebFetch / WebSearch / browser_navigate call.
@@ -36,7 +36,13 @@ export function extractWebFetches(
 
   const rows = db
     .prepare<[], ToolCallRow>(
-      `SELECT session_id, turn, idx, name, args_json FROM tool_calls${scopeWhere(scope)}`,
+      `SELECT session_id, turn, idx, name, args_json
+         FROM tool_calls
+        WHERE name IN (
+          'WebFetch', 'webfetch', 'fetch',
+          'WebSearch', 'websearch', 'search', 'web_search',
+          'browser_navigate', 'Navigate'
+        )${scopeAnd(scope)}`,
     )
     .all();
 
@@ -62,7 +68,7 @@ export function extractWebFetches(
       let query = pickString(args, ["query", "q", "search_term", "searchTerm"]);
       // codex web_search stores `queries: string[]` instead of `query`.
       if (!query) {
-        const list = args["queries"];
+        const list = args.queries;
         if (Array.isArray(list)) {
           const first = list.find((v) => typeof v === "string" && v.trim());
           if (typeof first === "string") query = first.trim();

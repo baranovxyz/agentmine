@@ -31,6 +31,7 @@ import {
   reportProgressImmediate,
 } from "../contract/progress.js";
 import { runCommand } from "../contract/result.js";
+import { attachArchive } from "../db/archives.js";
 import {
   CODEX_LINEAGE_BACKFILL_META_KEY,
   CODEX_TOKEN_USAGE_BACKFILL_META_KEY,
@@ -40,6 +41,7 @@ import {
   parseStoredSchemaVersion,
   upsertMeta,
 } from "../db/client.js";
+import { recordNormalizeSuccess } from "../db/freshness.js";
 import { withWriteLock } from "../db/lock.js";
 import { Database } from "../db/sqlite.js";
 import {
@@ -48,6 +50,7 @@ import {
   recordFileStat,
   sessionIsUpToDate,
   upsertSession,
+  writeSessionPayload,
 } from "../db/writer.js";
 import { loadExtensions } from "../extensions.js";
 import {
@@ -294,37 +297,16 @@ export const normalizeCommand = defineCommand({
           );
         }
 
+        const dryRun = Boolean(args["dry-run"]);
+        const scanWorkflows =
+          sources.some((source) => source.name === "claude-code") &&
+          existsSync(paths.rawClaudeCode);
         const totalFiles = fileSets.reduce((a, b) => a + b.files.length, 0);
         if (totalFiles === 0) {
-          // With a --since window, finding nothing recent is a normal no-op,
-          // not an error — the corpus is simply already current.
-          if (sinceSec !== null && !codexReparseRequired) {
-            return {
-              data: {
-                sources: sources.map((s) => s.name),
-                files_scanned: 0,
-                processed: 0,
-                processed_by_source: {},
-                skipped_up_to_date: 0,
-                skipped_unchanged: 0,
-                skipped_empty: 0,
-                skipped_by_filter: 0,
-                failed: 0,
-                workflow_runs: 0,
-                workflow_runs_skipped: 0,
-                redactions: 0,
-                redactions_by_source: {},
-                redacted: !args["no-redact"],
-                dry_run: Boolean(args["dry-run"]),
-                since_epoch: sinceSec,
-                db_path: getDbPath(),
-                ...(projectPathAllow
-                  ? { project_path_allow: projectPathAllow.raw }
-                  : {}),
-              },
-            };
-          }
-          if (!codexReparseRequired) {
+          // With a --since window, finding no recent transcripts is a normal
+          // no-op, but the locked path must still scan supra-session workflow
+          // artifacts and record successful completion.
+          if (sinceSec === null && !codexReparseRequired && !scanWorkflows) {
             throw Errors.notFound(
               `No input files found under any enabled source root (${sources
                 .map((s) => s.rootPath)
@@ -347,8 +329,6 @@ export const normalizeCommand = defineCommand({
         });
 
         const redact = !args["no-redact"];
-        const dryRun = Boolean(args["dry-run"]);
-
         // Serialize the write phase against concurrent agentmine writers (e.g. a
         // SessionStart hook's `normalize` racing a scheduled `ingest`). A dry run
         // writes no session data, so it skips the lock.
@@ -359,6 +339,14 @@ export const normalizeCommand = defineCommand({
               ? openDb({ readonly: true, init: false, path: dbPath })
               : openDb({ path: ":memory:" })
             : openDb();
+
+          // Normalize writes payload, so it attaches both archives and creates
+          // them on first ingest. `openDb` has already rejected a pre-split
+          // corpus through the common 0.9 compaction gate.
+          if (!dryRun) {
+            attachArchive(db, "raw", { create: true, dbPath });
+            attachArchive(db, "tools", { create: true, dbPath });
+          }
 
           let processed = 0;
           let skippedCached = 0;
@@ -436,7 +424,16 @@ export const normalizeCommand = defineCommand({
                 }),
               );
 
-              const upsert = db.transaction(() => {
+              // Sessions that survive classification and will actually be
+              // written. Collected first so payload can be committed in its own
+              // earlier transaction to preserve cold-first ordering.
+              const writable: Array<{
+                file: string;
+                session: CanonicalSession;
+                st: FileStat | null;
+              }> = [];
+
+              const classify = db.transaction(() => {
                 for (const { file, session, parseError } of parsed) {
                   const st = stats.get(file) ?? null;
                   if (parseError) {
@@ -490,6 +487,26 @@ export const normalizeCommand = defineCommand({
                       (processedBySource[session.source] ?? 0) + 1;
                     continue;
                   }
+                  writable.push({ file, session, st });
+                }
+              });
+              classify();
+
+              // Phase 1 — payload, committed before any hot row references it.
+              // A crash here can only orphan archive rows, which the next
+              // normalize of the same session overwrites idempotently.
+              if (writable.length > 0) {
+                const writePayload = db.transaction(() => {
+                  for (const { session } of writable) {
+                    writeSessionPayload(db, session);
+                  }
+                });
+                writePayload();
+              }
+
+              // Phase 2 — hot rows.
+              const upsert = db.transaction(() => {
+                for (const { file, session, st } of writable) {
                   try {
                     upsertSession(db, session);
                     processed += 1;
@@ -530,15 +547,26 @@ export const normalizeCommand = defineCommand({
           // mirror exists; its own content-hash cache skips unchanged runs.
           let workflowRuns = 0;
           let workflowSkipped = 0;
-          if (
-            sources.some((s) => s.name === "claude-code") &&
-            existsSync(paths.rawClaudeCode)
-          ) {
+          if (scanWorkflows) {
             const wf = await ingestWorkflowRuns(db, paths.rawClaudeCode, {
               dryRun,
             });
             workflowRuns = wf.runs;
             workflowSkipped = wf.skipped;
+          }
+
+          if (
+            totalFiles === 0 &&
+            sinceSec === null &&
+            !codexReparseRequired &&
+            workflowRuns + workflowSkipped === 0
+          ) {
+            db.close();
+            throw Errors.notFound(
+              `No input files found under any enabled source root (${sources
+                .map((source) => source.rootPath)
+                .join(", ")}). ${missingInputRecovery(sources)}`,
+            );
           }
 
           if (codexReparseRequired && !dryRun) {
@@ -565,6 +593,10 @@ export const normalizeCommand = defineCommand({
                 upsertMeta(db, CODEX_TOKEN_USAGE_BACKFILL_META_KEY, "0");
               }
             }
+          }
+
+          if (failed === 0 && !dryRun) {
+            recordNormalizeSuccess(db);
           }
 
           db.close();

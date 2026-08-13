@@ -8,7 +8,7 @@ import { openDb } from "../src/db/client.js";
 import {
   clearDirtySessions,
   getDirtySessions,
-  upsertSession,
+  upsertSessionWithPayload,
 } from "../src/db/writer.js";
 import { runAllExtractors } from "../src/extract/index.js";
 
@@ -144,8 +144,8 @@ describe("incremental extract == full rebuild", () => {
 
   it("marks upserted sessions dirty", () => {
     const db = openDb({ path: dbPath });
-    upsertSession(db, richSession("cc--a", 1));
-    upsertSession(db, richSession("cc--b", 1));
+    upsertSessionWithPayload(db, richSession("cc--a", 1));
+    upsertSessionWithPayload(db, richSession("cc--b", 1));
     expect(getDirtySessions(db).sort()).toEqual(["cc--a", "cc--b"]);
     clearDirtySessions(db, ["cc--a"]);
     expect(getDirtySessions(db)).toEqual(["cc--b"]);
@@ -155,13 +155,13 @@ describe("incremental extract == full rebuild", () => {
   it("scoped rebuild of a changed session matches a full rebuild", () => {
     const db = openDb({ path: dbPath });
     // Three sessions, initial full extract.
-    upsertSession(db, richSession("cc--a", 1));
-    upsertSession(db, richSession("cc--b", 1));
-    upsertSession(db, richSession("cc--c", 1));
+    upsertSessionWithPayload(db, richSession("cc--a", 1));
+    upsertSessionWithPayload(db, richSession("cc--b", 1));
+    upsertSessionWithPayload(db, richSession("cc--c", 1));
     runAllExtractors(db, null);
 
     // Change one session's content, then extract ONLY that session.
-    upsertSession(db, richSession("cc--b", 2));
+    upsertSessionWithPayload(db, richSession("cc--b", 2));
     runAllExtractors(db, ["cc--b"]);
     const incremental = snapshotFacts(db);
 
@@ -175,12 +175,12 @@ describe("incremental extract == full rebuild", () => {
 
   it("scoped rebuild of a brand-new session matches a full rebuild", () => {
     const db = openDb({ path: dbPath });
-    upsertSession(db, richSession("cc--a", 1));
-    upsertSession(db, richSession("cc--b", 1));
+    upsertSessionWithPayload(db, richSession("cc--a", 1));
+    upsertSessionWithPayload(db, richSession("cc--b", 1));
     runAllExtractors(db, null);
 
     // A new session arrives; extract only it.
-    upsertSession(db, richSession("cc--c", 3));
+    upsertSessionWithPayload(db, richSession("cc--c", 3));
     runAllExtractors(db, ["cc--c"]);
     const incremental = snapshotFacts(db);
 

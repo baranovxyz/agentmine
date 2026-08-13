@@ -41,7 +41,12 @@ CREATE TABLE IF NOT EXISTS sessions (
   agent_type TEXT,
   content_hash TEXT,
   redaction_count INTEGER,
-  raw_path TEXT
+  raw_path TEXT,
+  -- Payload row counts for this session. Cold payload lives in sibling archive
+  -- databases, so these let `stats` report corpus totals without
+  -- attaching an archive or walking its primary-key index.
+  raw_event_count INTEGER,
+  tool_output_count INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_source_started ON sessions(source, started_at);
 CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_path);
@@ -99,24 +104,11 @@ CREATE INDEX IF NOT EXISTS idx_tc_name ON tool_calls(name);
 CREATE INDEX IF NOT EXISTS idx_tc_args_hash ON tool_calls(args_hash);
 CREATE INDEX IF NOT EXISTS idx_tc_exit ON tool_calls(exit_code);
 
-CREATE TABLE IF NOT EXISTS tool_outputs (
-  session_id TEXT NOT NULL,
-  turn INTEGER NOT NULL,
-  idx INTEGER NOT NULL,
-  output_text TEXT NOT NULL,
-  PRIMARY KEY(session_id, turn, idx)
-);
-
-CREATE TABLE IF NOT EXISTS raw_events (
-  session_id TEXT NOT NULL,
-  seq INTEGER NOT NULL,
-  source TEXT NOT NULL,
-  event_type TEXT,
-  ts INTEGER,
-  raw_json TEXT NOT NULL,
-  PRIMARY KEY(session_id, seq)
-);
-CREATE INDEX IF NOT EXISTS idx_raw_events_type ON raw_events(source, event_type);
+-- NOTE: `tool_outputs` (full tool output) and `raw_events` (verbatim source
+-- events) are NOT declared here. They were 75% of corpus bytes while being
+-- unread by every interactive command, so they now live compressed in sibling
+-- archive databases created by `db/archives.ts`. A pre-split corpus
+-- still carries them until `agentmine compact` relocates and drops them.
 
 CREATE TABLE IF NOT EXISTS message_parts (
   session_id TEXT NOT NULL,
@@ -437,6 +429,14 @@ CREATE TABLE IF NOT EXISTS embedding_runs (
 CREATE TABLE IF NOT EXISTS meta (
   key TEXT PRIMARY KEY,
   value TEXT
+);
+
+-- Durable tombstones for privacy-sensitive purge. Hot rows are deleted first;
+-- these survive a crash until the corresponding cold archive rows are gone.
+CREATE TABLE IF NOT EXISTS pending_payload_purges (
+  session_id TEXT PRIMARY KEY,
+  raw_event_count INTEGER NOT NULL DEFAULT 0,
+  tool_output_count INTEGER NOT NULL DEFAULT 0
 );
 
 -- INCREMENTAL EXTRACT =================================================

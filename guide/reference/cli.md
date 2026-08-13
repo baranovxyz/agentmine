@@ -81,8 +81,14 @@ live databases during its `normalize` stage.
 
 | Command | Purpose |
 |---|---|
-| `agentmine backup` | Snapshot `sessions.db` before `normalize --force` or other rebuilds |
+| `agentmine backup` | Snapshot the complete SQLite corpus before `normalize --force` or other rebuilds |
+| `agentmine compact --dry-run` | Plan the one-time 0.8.x corpus storage split and check required disk space |
+| `agentmine compact` | Move verbatim payload into compressed sibling archives; resumable after interruption |
 | `agentmine prices sync` | Load `model_prices` from the vendored LiteLLM snapshot (offline); `--online` fetches live LiteLLM |
 | `agentmine prices ls` | List the loaded price table (USD per 1M tokens) |
 | `agentmine purge --project-path-allow <substring>` | Dry-run purge of sessions outside an allowlist |
 | `agentmine purge --project-path-allow <substring> --yes` | Delete sessions outside an allowlist |
+
+Agentmine 0.9 refuses normal corpus commands when it finds the pre-0.9 single-database layout.
+Run `agentmine compact --dry-run`, then `agentmine compact`. `agentmine backup` and the two compact
+forms remain available before migration so the recovery path never depends on a successful write.

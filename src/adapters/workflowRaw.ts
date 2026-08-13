@@ -15,6 +15,7 @@ import { readdir, readFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { z } from "zod";
 import type { DatabaseType } from "../db/client.js";
+import { markWorkflowExtractionPending } from "../db/freshness.js";
 import {
   upsertWorkflowRunRaw,
   type WorkflowJournalLineRaw,
@@ -103,6 +104,7 @@ export async function ingestWorkflowRuns(
         manifestJson,
         journalLines,
       });
+      markWorkflowExtractionPending(db);
     });
     tx();
     runs += 1;

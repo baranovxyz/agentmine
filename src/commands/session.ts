@@ -1,7 +1,13 @@
 import { defineCommand } from "citty";
 import { Errors } from "../contract/errors.js";
 import { type CommandOutcome, runCommand } from "../contract/result.js";
+import { archiveAlias, attachArchiveIfPresent } from "../db/archives.js";
 import { dbExists, openDb } from "../db/client.js";
+import {
+  extractionPendingWarnings,
+  readWithFreshnessSnapshot,
+} from "../db/freshness.js";
+import { decodePayload } from "../db/payloadCodec.js";
 
 type Data = Record<string, unknown>;
 
@@ -49,71 +55,93 @@ export const sessionCommand = defineCommand({
         if (!id) throw Errors.invalidInput("session id required");
         const db = openDb({ readonly: true });
         try {
-          const session = db
-            .prepare<[string], Record<string, unknown>>(
-              `SELECT * FROM sessions WHERE id = ?`,
-            )
-            .get(id);
-          if (!session) throw Errors.notFound(`Session ${id} not found`);
+          const snapshot = readWithFreshnessSnapshot(db, () => {
+            const session = db
+              .prepare<[string], Record<string, unknown>>(
+                `SELECT * FROM sessions WHERE id = ?`,
+              )
+              .get(id);
+            if (!session) throw Errors.notFound(`Session ${id} not found`);
 
-          const messages = db
-            .prepare<
-              [string],
-              {
-                turn: number;
-                role: string;
-                author: string | null;
-                ts: number | null;
-                text: string;
-              }
-            >(
-              `SELECT turn, role, author, ts, text FROM messages WHERE session_id = ? ORDER BY turn`,
-            )
-            .all(id);
-
-          const slicedMessages = sliceMessages(messages, args);
-          const retainedTurns = new Set(slicedMessages.map((msg) => msg.turn));
-
-          const toolCalls = db
-            .prepare<
-              [string],
-              {
-                turn: number;
-                idx: number;
-                name: string;
-                args_preview: string;
-                output_preview: string | null;
-                output_bytes: number | null;
-                exit_code: number | null;
-                duration_ms: number | null;
-                call_id: string | null;
-                output_text?: string;
-              }
-            >(
-              `SELECT turn, idx, name, args_preview, output_preview, output_bytes,
-                      exit_code, duration_ms, call_id
-                 FROM tool_calls WHERE session_id = ? ORDER BY turn, idx`,
-            )
-            .all(id)
-            .filter((tc) => retainedTurns.has(tc.turn));
-
-          if (args["show-context"]) {
-            const outputs = db
+            const messages = db
               .prepare<
                 [string],
-                { turn: number; idx: number; output_text: string }
+                {
+                  turn: number;
+                  role: string;
+                  author: string | null;
+                  ts: number | null;
+                  text: string;
+                }
               >(
-                `SELECT turn, idx, output_text FROM tool_outputs WHERE session_id = ?`,
+                `SELECT turn, role, author, ts, text FROM messages WHERE session_id = ? ORDER BY turn`,
               )
               .all(id);
-            const outputByKey = new Map(
-              outputs.map((row) => [`${row.turn}:${row.idx}`, row.output_text]),
+
+            const slicedMessages = sliceMessages(messages, args);
+            const retainedTurns = new Set(
+              slicedMessages.map((message) => message.turn),
             );
-            for (const tc of toolCalls) {
-              const outputText = outputByKey.get(`${tc.turn}:${tc.idx}`);
-              if (outputText !== undefined) tc.output_text = outputText;
+
+            const toolCalls = db
+              .prepare<
+                [string],
+                {
+                  turn: number;
+                  idx: number;
+                  name: string;
+                  args_preview: string;
+                  output_preview: string | null;
+                  output_bytes: number | null;
+                  exit_code: number | null;
+                  duration_ms: number | null;
+                  call_id: string | null;
+                  output_text?: string;
+                }
+              >(
+                `SELECT turn, idx, name, args_preview, output_preview, output_bytes,
+                        exit_code, duration_ms, call_id
+                   FROM tool_calls WHERE session_id = ? ORDER BY turn, idx`,
+              )
+              .all(id)
+              .filter((toolCall) => retainedTurns.has(toolCall.turn));
+
+            if (args["show-context"]) {
+              // Full tool output is the one hot-path read of archived payload,
+              // so the archive is attached here and nowhere else in this
+              // command.
+              const outputs = attachArchiveIfPresent(db, "tools")
+                ? db
+                    .prepare<
+                      [string],
+                      { turn: number; idx: number; payload: Uint8Array }
+                    >(
+                      `SELECT turn, idx, payload FROM ${archiveAlias("tools")}.tool_outputs
+                        WHERE session_id = ?`,
+                    )
+                    .all(id)
+                    .map((row) => ({
+                      turn: row.turn,
+                      idx: row.idx,
+                      output_text: decodePayload(row.payload),
+                    }))
+                : [];
+              const outputByKey = new Map(
+                outputs.map((row) => [
+                  `${row.turn}:${row.idx}`,
+                  row.output_text,
+                ]),
+              );
+              for (const toolCall of toolCalls) {
+                const outputText = outputByKey.get(
+                  `${toolCall.turn}:${toolCall.idx}`,
+                );
+                if (outputText !== undefined) toolCall.output_text = outputText;
+              }
             }
-          }
+            return { session, slicedMessages, toolCalls };
+          });
+          const { session, slicedMessages, toolCalls } = snapshot.value;
 
           if (args.md) {
             const md = renderMarkdown(session, slicedMessages, toolCalls);
@@ -128,6 +156,7 @@ export const sessionCommand = defineCommand({
               messages: slicedMessages,
               tool_calls: toolCalls,
             },
+            warnings: extractionPendingWarnings(snapshot.freshness),
           };
         } finally {
           db.close();

@@ -1,5 +1,5 @@
 import type { DatabaseType } from "../db/client.js";
-import { type ExtractScope, scopedDelete, scopeWhere } from "./scope.js";
+import { type ExtractScope, scopeAnd, scopedDelete } from "./scope.js";
 
 /**
  * mcp_calls: one row per MCP tool invocation.
@@ -27,7 +27,12 @@ export function extractMcpCalls(db: DatabaseType, scope: ExtractScope): number {
   const rows = db
     .prepare<[], ToolCallRow>(
       `SELECT session_id, turn, idx, name, args_json, args_hash, duration_ms, exit_code
-         FROM tool_calls${scopeWhere(scope)}`,
+         FROM tool_calls
+        WHERE (
+          lower(name) IN ('mcp_tool', 'call_mcp_tool')
+          OR name IN ('CallMcpTool', 'use_mcp_tool')
+          OR name GLOB 'mcp_*'
+        )${scopeAnd(scope)}`,
     )
     .all();
 

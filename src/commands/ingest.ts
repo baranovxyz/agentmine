@@ -1,9 +1,47 @@
 import { spawn } from "node:child_process";
 import { defineCommand } from "citty";
-import { Errors } from "../contract/errors.js";
+import { z } from "zod";
+import { CliError, Errors } from "../contract/errors.js";
 import { reportProgressImmediate } from "../contract/progress.js";
 import { runCommand } from "../contract/result.js";
+import { assertConfiguredCorpusReady } from "../db/client.js";
 import { resolveSelfInvocation } from "../runtime.js";
+
+const CHILD_DIAGNOSTIC_LIMIT = 500;
+
+const childCliErrorSchema = z.object({
+  code: z.number().int(),
+  name: z.string(),
+  message: z.string(),
+  category: z.enum(["user", "system", "transient"]),
+  retryable: z.boolean(),
+  path: z.string().optional(),
+  retryAfterSeconds: z.number().optional(),
+  details: z
+    .array(
+      z.object({
+        path: z.string(),
+        code: z.string(),
+        message: z.string(),
+      }),
+    )
+    .optional(),
+});
+
+const childErrorEnvelopeSchema = z.object({
+  version: z.number().int(),
+  status: z.literal("error"),
+  command: z.string(),
+  data: z.null(),
+  errors: z.array(childCliErrorSchema).min(1),
+  traceId: z.string(),
+});
+
+interface ChildResult {
+  exitCode: number | null;
+  stdout: string;
+  stderr: string;
+}
 
 export const ingestCommand = defineCommand({
   meta: {
@@ -46,6 +84,7 @@ export const ingestCommand = defineCommand({
     await runCommand({
       command: "agentmine ingest",
       handler: async () => {
+        assertConfiguredCorpusReady();
         const steps: Array<{
           step: string;
           status: "success";
@@ -85,17 +124,13 @@ async function runStep(
   const result = await runSelf(args);
   const duration = Date.now() - started;
   if (result.exitCode !== 0) {
-    throw Errors.internal(
-      `ingest step ${step} failed (exit ${result.exitCode}): ${result.stdout.slice(0, 500)}${result.stderr.slice(0, 500)}`,
-    );
+    throw ingestStepFailure(step, result);
   }
   reportProgressImmediate("ingest.step.done", { step, duration_ms: duration });
   steps.push({ step, status: "success", duration_ms: duration });
 }
 
-function runSelf(
-  args: string[],
-): Promise<{ exitCode: number | null; stdout: string; stderr: string }> {
+function runSelf(args: string[]): Promise<ChildResult> {
   return new Promise((resolve) => {
     const invocation = resolveSelfInvocation(args);
     const child = spawn(invocation.command, invocation.args, {
@@ -113,4 +148,33 @@ function runSelf(
     });
     child.on("close", (code) => resolve({ exitCode: code, stdout, stderr }));
   });
+}
+
+/** Convert a failed child command into the error exposed by `agentmine ingest`. */
+export function ingestStepFailure(step: string, result: ChildResult): CliError {
+  try {
+    const rawEnvelope: unknown = JSON.parse(result.stdout);
+    const envelope = childErrorEnvelopeSchema.safeParse(rawEnvelope);
+    if (envelope.success) {
+      const firstError = envelope.data.errors[0];
+      if (firstError !== undefined) return new CliError(firstError);
+    }
+  } catch {
+    // Fall through to a bounded diagnostic when stdout is not JSON.
+  }
+
+  const exitCode =
+    result.exitCode === null ? "signal" : String(result.exitCode);
+  return Errors.internal(
+    `ingest step ${step} failed (exit ${exitCode}); child did not emit a valid error envelope; ` +
+      `stdout: ${diagnosticExcerpt(result.stdout)}; stderr: ${diagnosticExcerpt(result.stderr)}`,
+  );
+}
+
+function diagnosticExcerpt(value: string): string {
+  const trimmed = value.trim();
+  if (trimmed.length === 0) return "<empty>";
+  return trimmed.length > CHILD_DIAGNOSTIC_LIMIT
+    ? `${trimmed.slice(0, CHILD_DIAGNOSTIC_LIMIT)}...`
+    : trimmed;
 }

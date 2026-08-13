@@ -7,6 +7,7 @@ import { paths } from "../config.js";
 import { Errors } from "../contract/errors.js";
 import { reportProgressImmediate } from "../contract/progress.js";
 import { runCommand } from "../contract/result.js";
+import { assertConfiguredCorpusReady } from "../db/client.js";
 
 interface SyncTarget {
   name: string;
@@ -110,6 +111,7 @@ export const syncCommand = defineCommand({
     await runCommand({
       command: "agentmine sync",
       handler: async () => {
+        assertConfiguredCorpusReady();
         const filter = args.source ? String(args.source) : undefined;
         let targets = TARGETS;
         if (filter) {

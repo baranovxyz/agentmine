@@ -79,6 +79,18 @@ The final command reports `bun-standalone`, the platform target, Bun version, an
 commit in Agentmine's JSON envelope. The macOS executables are not claimed to be Apple-notarized or
 platform-signed.
 
+When upgrading an existing 0.8.x corpus, inspect and apply the one-time storage split before any
+normal corpus command:
+
+```bash
+agentmine compact --dry-run
+agentmine compact
+```
+
+The migration is resumable and checks available disk space before writing. Agentmine 0.9 refuses
+normal corpus commands until it completes; `agentmine backup` remains available as the recovery
+step before migration.
+
 Or from source:
 
 ```bash
@@ -135,8 +147,8 @@ For Cline, the source directory follows Cline's own override precedence:
 `~/.cline/data/sessions`. Pi reads `~/.pi/agent/sessions`, Factory Droid reads
 `~/.factory/sessions`, and Mistral Vibe reads `~/.vibe/logs/session`.
 
-After the first import creates `sessions.db`, run `agentmine backup` before forced rebuilds or
-other destructive maintenance.
+After the first import creates the corpus, run `agentmine backup` before forced rebuilds or other
+destructive maintenance. The backup includes `sessions.db` and every existing payload archive.
 
 See [Getting started](guide/getting-started.md) for incremental imports, the
 project-path allowlist, and database-path overrides.

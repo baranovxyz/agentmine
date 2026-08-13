@@ -31,7 +31,9 @@ Default paths live under Agentmine's user data directory:
 | `<sessions>/droid/` | mirrored Factory Droid session JSONL + settings siblings from `~/.factory/sessions/` |
 | `<sessions>/vibe/` | mirrored Mistral Vibe session directories from `~/.vibe/logs/session/` |
 | `<sessions>/opencode/` | legacy file-based opencode archives, when present |
-| `<sessions>/sessions.db` | SQLite corpus |
+| `<sessions>/sessions.db` | Hot SQLite database used by browse, search, and reporting commands |
+| `<sessions>/sessions-raw.db` | Compressed verbatim source events; attached only when a command needs them |
+| `<sessions>/sessions-tools.db` | Compressed full tool output; attached only when a command needs it |
 | `<sessions>/backups/` | backup archives |
 
 Current OpenCode, Kilo Code, and Goose sessions are read directly from their live SQLite stores
@@ -78,3 +80,8 @@ sources that provide real usage counters.
 ```bash
 AGENTMINE_DB=/path/to/sessions.db agentmine stats
 ```
+
+The override names the hot database. Payload archives are derived beside it by replacing the
+`.db` suffix with `-raw.db` and `-tools.db`; for example, the command above uses
+`/path/to/sessions-raw.db` and `/path/to/sessions-tools.db`. Treat all three files as one corpus.
+`agentmine backup` snapshots the hot database and every existing sibling archive into one tarball.

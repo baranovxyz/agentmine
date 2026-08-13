@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -15,7 +16,7 @@ import {
   openDb,
   upsertMeta,
 } from "../src/db/client.js";
-import { upsertSession } from "../src/db/writer.js";
+import { upsertSessionWithPayload } from "../src/db/writer.js";
 import {
   buildEmbeddingChunks,
   deserializeVector,
@@ -30,6 +31,7 @@ const __dirname = dirname(__filename);
 const REPO = dirname(__dirname);
 const CLI = ["tsx", join(REPO, "src", "cli.ts")];
 const CLI_TEST_TIMEOUT = 15_000;
+const CLI_MULTI_COMMAND_TIMEOUT = 30_000;
 const CLI_HOOK_TIMEOUT = 20_000;
 
 async function runCli(args: string[], env: Record<string, string> = {}) {
@@ -100,7 +102,7 @@ describe("embedding schema", () => {
       id: "cc--embedding-lifecycle",
       contentHash: "v1",
     });
-    upsertSession(db, session);
+    upsertSessionWithPayload(db, session);
 
     db.prepare(
       `INSERT INTO embedding_models (provider, model, dimensions, created_at)
@@ -128,7 +130,7 @@ describe("embedding schema", () => {
        VALUES (?, ?, ?, 1, 8, 1700000001)`,
     ).run(chunkId, modelId, Buffer.alloc(32));
 
-    upsertSession(
+    upsertSessionWithPayload(
       db,
       makeSession({
         id: "cc--embedding-lifecycle",
@@ -283,7 +285,7 @@ describe("embed command", () => {
     tempDir = mkdtempSync(join(tmpdir(), "agentmine-embed-cli-"));
     dbPath = join(tempDir, "test.db");
     db = openDb({ path: dbPath });
-    upsertSession(
+    upsertSessionWithPayload(
       db,
       makeSession({
         id: "cc--embed-cli",
@@ -351,7 +353,7 @@ describe("embed command", () => {
 
   it("dry-run does not migrate or invalidate a legacy Codex database", async () => {
     const legacy = openDb({ path: dbPath });
-    upsertSession(
+    upsertSessionWithPayload(
       legacy,
       makeSession({
         id: "cx--embed-dry-run-legacy",
@@ -396,25 +398,29 @@ describe("embed command", () => {
     check.close();
   });
 
-  it("indexes chunks with fake provider and skips cached chunks on rerun", async () => {
-    const first = await runCli(
-      ["embed", "--provider", "fake", "--model", "fake", "--limit", "10"],
-      { AGENTMINE_DB: dbPath },
-    );
-    expect(first.exitCode).toBe(0);
-    const firstParsed = JSON.parse(first.stdout.trim());
-    expect(firstParsed.data.embedded_chunks).toBeGreaterThan(0);
-    expect(firstParsed.data.status).toBe("completed");
+  it(
+    "indexes chunks with fake provider and skips cached chunks on rerun",
+    async () => {
+      const first = await runCli(
+        ["embed", "--provider", "fake", "--model", "fake", "--limit", "10"],
+        { AGENTMINE_DB: dbPath },
+      );
+      expect(first.exitCode).toBe(0);
+      const firstParsed = JSON.parse(first.stdout.trim());
+      expect(firstParsed.data.embedded_chunks).toBeGreaterThan(0);
+      expect(firstParsed.data.status).toBe("completed");
 
-    const second = await runCli(
-      ["embed", "--provider", "fake", "--model", "fake", "--limit", "10"],
-      { AGENTMINE_DB: dbPath },
-    );
-    expect(second.exitCode).toBe(0);
-    const secondParsed = JSON.parse(second.stdout.trim());
-    expect(secondParsed.data.embedded_chunks).toBe(0);
-    expect(secondParsed.data.skipped_cached_chunks).toBeGreaterThan(0);
-  });
+      const second = await runCli(
+        ["embed", "--provider", "fake", "--model", "fake", "--limit", "10"],
+        { AGENTMINE_DB: dbPath },
+      );
+      expect(second.exitCode).toBe(0);
+      const secondParsed = JSON.parse(second.stdout.trim());
+      expect(secondParsed.data.embedded_chunks).toBe(0);
+      expect(secondParsed.data.skipped_cached_chunks).toBeGreaterThan(0);
+    },
+    CLI_MULTI_COMMAND_TIMEOUT,
+  );
 
   it(
     "dry-run reports already embedded chunks as cached without writing receipts",
@@ -459,7 +465,7 @@ describe("similar embedding modes", () => {
     tempDir = mkdtempSync(join(tmpdir(), "agentmine-similar-embedding-"));
     dbPath = join(tempDir, "test.db");
     db = openDb({ path: dbPath });
-    upsertSession(
+    upsertSessionWithPayload(
       db,
       makeSession({
         id: "cc--semantic-auth",
@@ -481,7 +487,7 @@ describe("similar embedding modes", () => {
         ],
       }),
     );
-    upsertSession(
+    upsertSessionWithPayload(
       db,
       makeSession({
         id: "cc--tool-only-auth",
@@ -505,7 +511,7 @@ describe("similar embedding modes", () => {
         ],
       }),
     );
-    upsertSession(
+    upsertSessionWithPayload(
       db,
       makeSession({
         id: "custom--semantic-auth",
@@ -523,7 +529,7 @@ describe("similar embedding modes", () => {
         ],
       }),
     );
-    upsertSession(
+    upsertSessionWithPayload(
       db,
       makeSession({
         id: "cc--multi-auth",
@@ -539,7 +545,7 @@ describe("similar embedding modes", () => {
         })),
       }),
     );
-    upsertSession(
+    upsertSessionWithPayload(
       db,
       makeSession({
         id: "cc--sqlite-migration",
@@ -561,7 +567,7 @@ describe("similar embedding modes", () => {
         ],
       }),
     );
-    upsertSession(
+    upsertSessionWithPayload(
       db,
       makeSession({
         id: "cc--long-fts-snippet",
@@ -577,7 +583,7 @@ describe("similar embedding modes", () => {
         ],
       }),
     );
-    upsertSession(
+    upsertSessionWithPayload(
       db,
       makeSession({
         id: "cc--injected-auth",
@@ -593,7 +599,7 @@ describe("similar embedding modes", () => {
         ],
       }),
     );
-    upsertSession(
+    upsertSessionWithPayload(
       db,
       makeSession({
         id: "cc--mixed-injected-auth",
@@ -766,109 +772,117 @@ describe("similar embedding modes", () => {
     expect(parsed.data.rows[0].chunk_id).toBeTruthy();
   });
 
-  it("excludes embedding chunks containing any injected source turn", async () => {
-    const readDb = openDb({ path: dbPath, readonly: true });
-    const mixedChunk = readDb
-      .prepare(
-        `SELECT start_turn, end_turn
+  it(
+    "excludes embedding chunks containing any injected source turn",
+    async () => {
+      const readDb = openDb({ path: dbPath, readonly: true });
+      const mixedChunk = readDb
+        .prepare(
+          `SELECT start_turn, end_turn
            FROM embedding_chunks
           WHERE session_id = ?`,
-      )
-      .get("cc--mixed-injected-auth") as
-      | { start_turn: number; end_turn: number }
-      | undefined;
-    readDb.close();
-    expect(mixedChunk).toEqual({ start_turn: 1, end_turn: 3 });
+        )
+        .get("cc--mixed-injected-auth") as
+        | { start_turn: number; end_turn: number }
+        | undefined;
+      readDb.close();
+      expect(mixedChunk).toEqual({ start_turn: 1, end_turn: 3 });
 
-    const baseArgs = [
-      "similar",
-      "oauth login redirect",
-      "--mode",
-      "embedding",
-      "--provider",
-      "fake",
-      "--model",
-      "fake",
-      "--limit",
-      "20",
-    ];
-    const filtered = await runCli(baseArgs, { AGENTMINE_DB: dbPath });
-    expect(filtered.exitCode).toBe(0);
-    const filteredJson = JSON.parse(filtered.stdout.trim());
-    expect(
-      filteredJson.data.rows.map(
-        (row: { session_id: string }) => row.session_id,
-      ),
-    ).not.toContain("cc--injected-auth");
-    expect(
-      filteredJson.data.rows.map(
-        (row: { session_id: string }) => row.session_id,
-      ),
-    ).not.toContain("cc--mixed-injected-auth");
+      const baseArgs = [
+        "similar",
+        "oauth login redirect",
+        "--mode",
+        "embedding",
+        "--provider",
+        "fake",
+        "--model",
+        "fake",
+        "--limit",
+        "20",
+      ];
+      const filtered = await runCli(baseArgs, { AGENTMINE_DB: dbPath });
+      expect(filtered.exitCode).toBe(0);
+      const filteredJson = JSON.parse(filtered.stdout.trim());
+      expect(
+        filteredJson.data.rows.map(
+          (row: { session_id: string }) => row.session_id,
+        ),
+      ).not.toContain("cc--injected-auth");
+      expect(
+        filteredJson.data.rows.map(
+          (row: { session_id: string }) => row.session_id,
+        ),
+      ).not.toContain("cc--mixed-injected-auth");
 
-    const included = await runCli([...baseArgs, "--include-injected"], {
-      AGENTMINE_DB: dbPath,
-    });
-    expect(included.exitCode).toBe(0);
-    const includedJson = JSON.parse(included.stdout.trim());
-    expect(
-      includedJson.data.rows.map(
-        (row: { session_id: string }) => row.session_id,
-      ),
-    ).toContain("cc--injected-auth");
-    expect(
-      includedJson.data.rows.map(
-        (row: { session_id: string }) => row.session_id,
-      ),
-    ).toContain("cc--mixed-injected-auth");
-  });
+      const included = await runCli([...baseArgs, "--include-injected"], {
+        AGENTMINE_DB: dbPath,
+      });
+      expect(included.exitCode).toBe(0);
+      const includedJson = JSON.parse(included.stdout.trim());
+      expect(
+        includedJson.data.rows.map(
+          (row: { session_id: string }) => row.session_id,
+        ),
+      ).toContain("cc--injected-auth");
+      expect(
+        includedJson.data.rows.map(
+          (row: { session_id: string }) => row.session_id,
+        ),
+      ).toContain("cc--mixed-injected-auth");
+    },
+    CLI_MULTI_COMMAND_TIMEOUT,
+  );
 
-  it("does not treat a mixed injected chunk as a usable auto-mode index", async () => {
-    const writeDb = openDb({ path: dbPath });
-    writeDb
-      .prepare(
-        `DELETE FROM embeddings
+  it(
+    "does not treat a mixed injected chunk as a usable auto-mode index",
+    async () => {
+      const writeDb = openDb({ path: dbPath });
+      writeDb
+        .prepare(
+          `DELETE FROM embeddings
           WHERE chunk_id NOT IN (
             SELECT id FROM embedding_chunks WHERE session_id = ?
           )`,
-      )
-      .run("cc--mixed-injected-auth");
-    writeDb.close();
+        )
+        .run("cc--mixed-injected-auth");
+      writeDb.close();
 
-    const args = [
-      "similar",
-      "oauth login redirect",
-      "--project",
-      "/tmp/agentmine-embeddings",
-      "--provider",
-      "fake",
-      "--model",
-      "fake",
-      "--limit",
-      "10",
-    ];
-    const filtered = await runCli(args, {
-      AGENTMINE_DB: dbPath,
-      AGENTMINE_CURRENT_SESSION_ID: "cc--semantic-auth",
-    });
-    expect(filtered.exitCode).toBe(0);
-    const filteredJson = JSON.parse(filtered.stdout.trim());
-    expect(filteredJson.data.mode_selection.selected).toBe("fts");
-    expect(
-      filteredJson.data.mode_selection.guardrails.embedding_index_found,
-    ).toBe(false);
+      const args = [
+        "similar",
+        "oauth login redirect",
+        "--project",
+        "/tmp/agentmine-embeddings",
+        "--provider",
+        "fake",
+        "--model",
+        "fake",
+        "--limit",
+        "10",
+      ];
+      const filtered = await runCli(args, {
+        AGENTMINE_DB: dbPath,
+        AGENTMINE_CURRENT_SESSION_ID: "cc--semantic-auth",
+      });
+      expect(filtered.exitCode).toBe(0);
+      const filteredJson = JSON.parse(filtered.stdout.trim());
+      expect(filteredJson.data.mode_selection.selected).toBe("fts");
+      expect(
+        filteredJson.data.mode_selection.guardrails.embedding_index_found,
+      ).toBe(false);
 
-    const included = await runCli([...args, "--include-injected"], {
-      AGENTMINE_DB: dbPath,
-      AGENTMINE_CURRENT_SESSION_ID: "cc--semantic-auth",
-    });
-    expect(included.exitCode).toBe(0);
-    const includedJson = JSON.parse(included.stdout.trim());
-    expect(includedJson.data.mode_selection.selected).toBe("hybrid");
-    expect(
-      includedJson.data.mode_selection.guardrails.embedding_index_found,
-    ).toBe(true);
-  });
+      const included = await runCli([...args, "--include-injected"], {
+        AGENTMINE_DB: dbPath,
+        AGENTMINE_CURRENT_SESSION_ID: "cc--semantic-auth",
+      });
+      expect(included.exitCode).toBe(0);
+      const includedJson = JSON.parse(included.stdout.trim());
+      expect(includedJson.data.mode_selection.selected).toBe("hybrid");
+      expect(
+        includedJson.data.mode_selection.guardrails.embedding_index_found,
+      ).toBe(true);
+    },
+    CLI_MULTI_COMMAND_TIMEOUT,
+  );
 
   it(
     "warns when semantic retrieval has no current-session exclusion context",
@@ -897,57 +911,61 @@ describe("similar embedding modes", () => {
     CLI_HOOK_TIMEOUT,
   );
 
-  it("applies source and project filters to embedding candidates", async () => {
-    const bySource = await runCli(
-      [
-        "similar",
-        "oauth login redirect",
-        "--mode",
-        "embedding",
-        "--provider",
-        "fake",
-        "--model",
-        "fake",
-        "--source",
-        "claude-code",
-        "--limit",
-        "10",
-      ],
-      { AGENTMINE_DB: dbPath },
-    );
-    expect(bySource.exitCode).toBe(0);
-    const sourceJson = JSON.parse(bySource.stdout.trim());
-    expect(
-      sourceJson.data.rows.every(
-        (row: { source: string }) => row.source === "claude-code",
-      ),
-    ).toBe(true);
+  it(
+    "applies source and project filters to embedding candidates",
+    async () => {
+      const bySource = await runCli(
+        [
+          "similar",
+          "oauth login redirect",
+          "--mode",
+          "embedding",
+          "--provider",
+          "fake",
+          "--model",
+          "fake",
+          "--source",
+          "claude-code",
+          "--limit",
+          "10",
+        ],
+        { AGENTMINE_DB: dbPath },
+      );
+      expect(bySource.exitCode).toBe(0);
+      const sourceJson = JSON.parse(bySource.stdout.trim());
+      expect(
+        sourceJson.data.rows.every(
+          (row: { source: string }) => row.source === "claude-code",
+        ),
+      ).toBe(true);
 
-    const byProject = await runCli(
-      [
-        "similar",
-        "oauth login redirect",
-        "--mode",
-        "embedding",
-        "--provider",
-        "fake",
-        "--model",
-        "fake",
-        "--project",
-        "/tmp/agentmine-embeddings",
-        "--limit",
-        "10",
-      ],
-      { AGENTMINE_DB: dbPath },
-    );
-    expect(byProject.exitCode).toBe(0);
-    const projectJson = JSON.parse(byProject.stdout.trim());
-    expect(
-      projectJson.data.rows.every((row: { project_path: string }) =>
-        row.project_path.startsWith("/tmp/agentmine-embeddings"),
-      ),
-    ).toBe(true);
-  });
+      const byProject = await runCli(
+        [
+          "similar",
+          "oauth login redirect",
+          "--mode",
+          "embedding",
+          "--provider",
+          "fake",
+          "--model",
+          "fake",
+          "--project",
+          "/tmp/agentmine-embeddings",
+          "--limit",
+          "10",
+        ],
+        { AGENTMINE_DB: dbPath },
+      );
+      expect(byProject.exitCode).toBe(0);
+      const projectJson = JSON.parse(byProject.stdout.trim());
+      expect(
+        projectJson.data.rows.every((row: { project_path: string }) =>
+          row.project_path.startsWith("/tmp/agentmine-embeddings"),
+        ),
+      ).toBe(true);
+    },
+    CLI_MULTI_COMMAND_TIMEOUT,
+  );
 
   it("applies time and root-session filters to embedding candidates", async () => {
     const currentDay = Math.floor(Date.parse("2026-07-23T10:00:00Z") / 1000);
@@ -1195,7 +1213,7 @@ describe("ollama provider error paths", () => {
     tempDir = mkdtempSync(join(tmpdir(), "agentmine-ollama-provider-"));
     dbPath = join(tempDir, "test.db");
     db = openDb({ path: dbPath });
-    upsertSession(
+    upsertSessionWithPayload(
       db,
       makeSession({
         id: "cc--ollama-provider",
@@ -1216,6 +1234,61 @@ describe("ollama provider error paths", () => {
   afterEach(() => {
     rmSync(tempDir, { recursive: true, force: true });
   });
+
+  it(
+    "does not call Ollama when auto mode has no usable embedding index",
+    async () => {
+      const requestPaths: string[] = [];
+      const server = createServer((request, response) => {
+        requestPaths.push(request.url ?? "");
+        response.statusCode = 500;
+        response.end("unexpected request");
+      });
+      await new Promise<void>((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(0, "127.0.0.1", resolve);
+      });
+      const address = server.address();
+      if (!address || typeof address === "string") {
+        server.close();
+        throw new Error("expected a local TCP address");
+      }
+
+      try {
+        const { exitCode, stdout } = await runCli(
+          [
+            "similar",
+            "local embeddings test",
+            "--mode",
+            "auto",
+            "--project",
+            "/tmp/agentmine-embeddings",
+            "--provider",
+            "ollama",
+            "--model",
+            "nomic-embed-text",
+          ],
+          {
+            AGENTMINE_DB: dbPath,
+            AGENTMINE_CURRENT_SESSION_ID: "cc--outside-corpus",
+            AGENTMINE_OLLAMA_BASE_URL: `http://127.0.0.1:${address.port}`,
+          },
+        );
+        expect(exitCode).toBe(0);
+        const parsed = JSON.parse(stdout.trim());
+        expect(parsed.data.mode).toBe("fts");
+        expect(parsed.data.mode_selection.fallback_reason).toBe(
+          "missing_embedding_index",
+        );
+        expect(requestPaths).toEqual([]);
+      } finally {
+        await new Promise<void>((resolve, reject) => {
+          server.close((error) => (error ? reject(error) : resolve()));
+        });
+      }
+    },
+    CLI_TEST_TIMEOUT,
+  );
 
   it(
     "rejects unsupported ollama models before provider calls",

@@ -37,8 +37,9 @@ package "Parsing boundary" {
 }
 
 rectangle "CanonicalSession\nSession + Message[] + ToolCall[]\nRawEvent[]" as canonical
-database "SQLite corpus\nsessions\nmessages + messages_fts\ntool_calls" as core
-database "Lossless + fact tables\nraw_events\ntool_outputs\nfiles_touched\nshell_commands\nuser_corrections\ntool_errors\nskills_invoked\nmcp_calls\n..." as facts
+database "Hot corpus — sessions.db\nsessions\nmessages + messages_fts\ntool_calls" as core
+database "Fact tables — sessions.db\nfiles_touched\nshell_commands\nuser_corrections\ntool_errors\nskills_invoked\nskills_available\nmcp_calls\n..." as facts
+database "Payload archives\nsessions-raw.db: raw_events\nsessions-tools.db: tool_outputs\n(zstd BLOBs, attached on demand)" as archives
 database "Workflow tables\nraw_workflow_runs\nraw_workflow_journal\nworkflow_runs\nworkflow_run_phases\nworkflow_agents" as workflows
 rectangle "Browse commands\nCliResult JSON on stdout\nNDJSON progress on stderr\nsemantic exit code" as cli
 
@@ -64,6 +65,7 @@ sharedParsers --> flatteningSeam
 flatteningSeam --> canonical
 extensionAdapters --> canonical
 
+canonical --> archives : writeSessionPayload (commits first)
 canonical --> core : upsertSession
 core --> facts : extract
 core --> workflows : extract + link sessions
@@ -77,7 +79,8 @@ Three layers, each with a stable contract:
 
 1. **Parsers** read per-tool source data through `agent-canonical`; the flattening seam emits the
    Agentmine `CanonicalSession` shape. Extension adapters can emit that shape directly.
-2. **DB writer** upserts canonical shape into the core and lossless tables idempotently.
+2. **DB writer** upserts canonical shape idempotently — cold payload into the archives first, then
+   the hot rows that reference it, preserving the cold-first ordering invariant.
 3. **Extractors** read tool_calls and messages, write fact tables.
 
 Claude Code workflow manifests and journals take a parallel supra-session path. `normalize` stores
@@ -114,9 +117,10 @@ MessagePart { sourceSeq, partIdx, turn?, role, partType,
               includedInMessageText }
 ```
 
-`outputPreview` stays bounded for browsing while `outputFull` is persisted to `tool_outputs` for
-complete analysis. `rawEvents` are stored in `raw_events` so adapter improvements can be audited
-against source data. `messageParts` preserve ordered source content parts that may be more
+`outputPreview` stays bounded for browsing while `outputFull` is persisted for complete analysis.
+`rawEvents` are retained so adapter improvements can be audited against source data. Both are cold
+payload and live in sibling archive databases rather than `sessions.db` — see
+[Storage layout](#storage-layout--sibling-payload-archives). `messageParts` preserve ordered source content parts that may be more
 structured than the normalized `messages` text, or intentionally excluded from it (for example
 Cursor wrapper blocks and image parts).
 
@@ -149,9 +153,43 @@ reportProgressImmediate("phase.start");   // bypasses throttle
 
 Throttled to 10 Hz to avoid log spam. Events go to stderr; stdout stays data-only.
 
+## Storage layout — sibling payload archives
+
+A corpus is **three SQLite files**, not one:
+
+| file | holds |
+|---|---|
+| `sessions.db` | everything queries read: sessions, messages, tool-call metadata + previews, all fact and pattern tables, FTS, every index |
+| `sessions-raw.db` | `raw_events` — verbatim source events |
+| `sessions-tools.db` | `tool_outputs` — full untruncated tool output |
+
+Verbatim payload was ~75% of corpus bytes while no interactive command read it, and its index pages
+interleaved with hot rows across the whole file, so cold reads paid for data they never used.
+Archived payload is stored zstd-3 compressed as BLOBs with a one-byte encoding frame
+([src/db/payloadCodec.ts](src/db/payloadCodec.ts)) and reached through
+[src/db/archives.ts](src/db/archives.ts).
+
+Consequences that constrain new code:
+
+- **Attach on demand, never by default.** A command that needs payload calls `attachArchive`; one
+  that does not must never attach, so its cost stays bounded by the hot database. `stats` reads
+  payload totals from the `sessions.raw_event_count` / `tool_output_count` counters.
+- **Payload is not SQL-searchable.** It is compressed binary, so `LIKE` and `json_extract` cannot
+  reach it. Derive what you need at normalize time from parsed events instead of scanning payload
+  later — this is why skill listings moved into the writer.
+- **Cross-database transactions are NOT atomic under WAL.** Ordering substitutes for atomicity:
+  `writeSessionPayload` commits before `upsertSession`; deletes go hot-first. An interruption may
+  orphan archive rows (valid, self-healing) but must never leave a hot row without its payload.
+  Single-session callers use `upsertSessionWithPayload`, which orders both phases.
+- `agentmine compact` migrates a pre-0.9 corpus and is resumable. The common database-open gate
+  refuses every normal corpus command until it has run; `backup` and `compact` are the recovery
+  exceptions. `agentmine backup` holds the corpus writer lock while snapshotting the hot database
+  and every existing payload archive, so its tarball is a complete corpus backup.
+
 ## Database lifecycle
 
-- `openDb({ readonly?, init?, path? })` — returns a [src/db/sqlite.ts](src/db/sqlite.ts) handle, a
+- `openDb({ readonly?, init?, path?, allowPreSplit? })` — returns a
+  [src/db/sqlite.ts](src/db/sqlite.ts) handle, a
   compatibility shim over Node's built-in `node:sqlite` (`DatabaseSync`) in the npm distribution
   and Bun's built-in `bun:sqlite` (`Database`) in standalone executables. It reproduces the small
   better-sqlite3-style API the codebase uses (`prepare<P, R>` / `pragma` / `transaction` /
@@ -165,7 +203,12 @@ Throttled to 10 Hz to avoid log spam. Events go to stderr; stdout stays data-onl
 - Batch multi-statement SQL uses `runMultiStatementSql(db, sql)`, which calls the shim's
   `execBatch` compatibility method instead of reaching into `DatabaseSync` from callers.
 - `upsertSession` is the only writer for normalized session data. It replaces each session's
-  `messages`, `tool_calls`, `raw_events`, and `tool_outputs` in one transaction.
+  `messages` and `tool_calls` in one transaction. Cold payload is written separately and
+  **earlier** by `writeSessionPayload`; see [Storage layout](#storage-layout--sibling-payload-archives).
+- `dirty_sessions` plus the raw-workflow pending marker form the authoritative
+  normalized-to-derived freshness boundary. Successful normalize and extract runs record stage
+  timestamps in `meta`; `src/db/freshness.ts` combines those timestamps with both pending signals
+  for `stats` and fact-reading command warnings.
 - `upsertWorkflowRunRaw` stores one workflow manifest and its journal rows idempotently; the
   workflow extractor rebuilds the derived workflow tables.
 
@@ -198,7 +241,7 @@ Claude Code specific:
   `<bash-stdout>`, `<bash-stderr>`, `<persisted-output>`, `<system-reminder>`,
   `<task-notification>`, `<retrieval>`.
 - Pairs `tool_use` with subsequent `tool_result` by `toolUseID` within the same session.
-- Preserves raw JSONL events in `raw_events` and full tool results in `tool_outputs`.
+- Preserves raw JSONL events and full tool results; both are archived as cold payload.
 - Accepts `AdapterOptions.source` and `AdapterOptions.idPrefix` to override the default
   `"claude-code"` / `"cc"` values for custom agent-CLI session imports.
 - Subagent `.jsonl` files under `subagents/` are ingested by the recursive directory walker.
@@ -358,6 +401,10 @@ whole corpus and they are cheap once `idx_sessions_parent` exists.
 `tests/incrementalExtract.test.ts` pins the invariant: a scoped rebuild of a changed session
 equals a full rebuild.
 
+Raw workflow manifests and journals have a separate durable pending marker because they can change
+without a transcript changing. A workflow-only extract rebuilds just the workflow fact tables;
+ordinary scoped and forced extracts also clear that marker after rebuilding them.
+
 Adding an extractor:
 
 1. New file `src/extract/<name>.ts` exporting `extract<Thing>(db, scope): number`. Swap the
@@ -401,8 +448,49 @@ Notes:
 
 ## Testing strategy
 
+### Cold-import benchmark
+
+From the Agentmine package root, `pnpm --silent benchmark:cold-import` runs the local-only
+cold-normalize harness in `scripts/cold-import-benchmark.mjs`. `--silent` preserves its
+one-JSON-line stdout contract. The harness requires a transcript archive path, an absolute work
+directory outside every registered Git worktree, a fixed UTC cutoff, a lowercase variant ID, and
+absolute paths to pinned Node and Bun Agentmine artifacts. The runtime invocation must reference
+the matching declared artifact. For example:
+
+```bash
+pnpm --silent benchmark:cold-import \
+  --variant baseline \
+  --archive-root ~/claude-history-YYYYMMDD \
+  --work-dir /var/tmp/agentmine-cold-import \
+  --cutoff 2026-01-01T00:00:00Z \
+  --node-command node \
+  --node-arg /path/to/node-artifact/cli.js \
+  --node-artifact /path/to/node-artifact \
+  --bun-command /path/to/agentmine-bun \
+  --bun-artifact /path/to/agentmine-bun
+```
+
+The defaults select exactly 1,000 unique root Claude Code session files near 512 MiB and measure
+three serial ABBA blocks. Directory fingerprints hash sorted per-file SHA-256 output with relative
+names; a standalone-file fingerprint hashes its raw bytes. The receipt also records file count and
+total bytes. The harness verifies the active artifact before and after every run, and artifact trees
+must not contain symlinks.
+
+The harness creates a new database for every run, aborts below 8 GiB free or above 2 GiB for the
+database plus WAL, validates SQLite and FTS integrity plus fixed query hashes, deletes the staged
+fixture and databases, and retains one path-scrubbed local receipt. That receipt still contains
+corpus-derived counts and non-reversible fingerprints, so treat it as sensitive and do not publish
+it. Its compatibility fixture digest covers the selected JSONL bytes; a second tree digest binds
+relative paths and supplemental metadata. It rehashes every staged file after the runs. Use
+`--stage-mode copy` when the archive and work directory are on different filesystems or source
+inode metadata must remain untouched. Hardlink creation and removal update source ctime without
+changing contents. A lowered safety floor is recorded in the receipt; do not lower it for a result
+intended to guide production changes. The first `SIGINT` or `SIGTERM` terminates the active process
+group and waits for cleanup; a second signal hard-stops it.
+
 | Test file | Coverage |
 |---|---|
+| [tests/coldImportBenchmark.test.ts](tests/coldImportBenchmark.test.ts) | Fixture selection and revalidation, fresh-session accounting, artifact pinning, ABBA scheduling, cutoff filtering, worktree containment, signal handling, GNU time parsing, coded errors, and path sanitization. |
 | [tests/smoke.test.ts](tests/smoke.test.ts) | CLI envelope shape, exit codes, and stdout cleanliness from source via `tsx` + `execa`. |
 | [tests/distSmoke.test.ts](tests/distSmoke.test.ts) | Packed CLI/library loading, file allowlist, Markdown links, warning behavior, and executable mode. CI also runs it on exact Node 24.0.0. |
 | [tests/canonicalSeam.test.ts](tests/canonicalSeam.test.ts) | Canonical seam smoke: Claude Code, Gemini, Qwen, Cline, and Copilot fixtures flow through shared `agent-canonical` parsers into the flat `CanonicalSession` shape. |

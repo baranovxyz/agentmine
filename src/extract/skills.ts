@@ -1,5 +1,5 @@
 import type { DatabaseType } from "../db/client.js";
-import { type ExtractScope, scopedDelete, scopeWhere } from "./scope.js";
+import { type ExtractScope, scopeAnd, scopedDelete } from "./scope.js";
 
 /**
  * skills_invoked: one row per agent skill invocation.
@@ -26,7 +26,13 @@ export function extractSkillsInvoked(
 
   const rows = db
     .prepare<[], ToolCallRow>(
-      `SELECT session_id, turn, idx, name, args_json FROM tool_calls${scopeWhere(scope)}`,
+      `SELECT session_id, turn, idx, name, args_json
+         FROM tool_calls
+        WHERE (
+          lower(name) = 'skill'
+          OR lower(name) GLOB 'skill[_:-]*'
+          OR instr(args_json, 'SKILL.md') > 0
+        )${scopeAnd(scope)}`,
     )
     .all();
 
@@ -62,7 +68,7 @@ function collectSkillSlugs(name: string, argsJson: string | null): string[] {
     return dedupe(out);
   }
   const skillTool = name.match(/^skill[_:-](.+)$/i);
-  if (skillTool && skillTool[1]) {
+  if (skillTool?.[1]) {
     out.push(skillTool[1]);
     return dedupe(out);
   }
@@ -70,7 +76,7 @@ function collectSkillSlugs(name: string, argsJson: string | null): string[] {
   // Sometimes a Skill is invoked indirectly by passing a SKILL.md path to Read.
   // We only record this when the args explicitly reference SKILL.md, since
   // many other Read calls touch arbitrary files.
-  if (argsJson && argsJson.includes("SKILL.md")) {
+  if (argsJson?.includes("SKILL.md")) {
     const slug = slugFromSkillPath(argsJson);
     if (slug) out.push(slug);
   }
@@ -84,7 +90,7 @@ function slugFromArgs(argsJson: string): string | null {
       const v = obj[k];
       if (typeof v === "string" && v.trim()) return v.trim();
     }
-    const path = obj["path"] ?? obj["file_path"];
+    const path = obj.path ?? obj.file_path;
     if (typeof path === "string") return slugFromSkillPath(path);
   } catch {
     /* ignore */
@@ -95,7 +101,7 @@ function slugFromArgs(argsJson: string): string | null {
 function slugFromSkillPath(s: string): string | null {
   // .../skills/<slug>/SKILL.md  or  .../skills-<scope>/<slug>/SKILL.md
   const m = s.match(/skills(?:-[a-z]+)?\/([^/]+)\/SKILL\.md/);
-  return m && m[1] ? m[1] : null;
+  return m?.[1] ?? null;
 }
 
 function dedupe(arr: string[]): string[] {

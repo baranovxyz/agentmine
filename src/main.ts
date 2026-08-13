@@ -1,5 +1,6 @@
 import { defineCommand, runMain } from "citty";
 import { backupCommand } from "./commands/backup.js";
+import { compactCommand } from "./commands/compact.js";
 import { embedCommand } from "./commands/embed.js";
 import { extractCommand } from "./commands/extract.js";
 import { ftsCommand } from "./commands/fts.js";
@@ -26,12 +27,13 @@ const main = defineCommand({
     name: "agentmine",
     version: VERSION,
     description:
-      "Long-term memory for your AI coding agents. One local SQLite corpus of your Claude Code / Cursor / Codex / Copilot / OpenCode sessions — resume prior work, recall how you solved something before, and reconstruct what past sessions did. Agent-first JSON CLI.",
+      "Long-term memory for your AI coding agents. A local corpus backed by SQLite for your Claude Code / Cursor / Codex / Copilot / OpenCode sessions — resume prior work, recall how you solved something before, and reconstruct what past sessions did. Agent-first JSON CLI.",
   },
   subCommands: {
     version: versionCommand,
     schema: schemaCommand,
     backup: backupCommand,
+    compact: compactCommand,
     sync: syncCommand,
     ingest: ingestCommand,
     normalize: normalizeCommand,

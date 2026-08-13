@@ -1,5 +1,7 @@
 import { z } from "zod";
+import { archiveAlias, attachArchiveIfPresent } from "../db/archives.js";
 import type { DatabaseType } from "../db/client.js";
+import { decodePayload } from "../db/payloadCodec.js";
 
 /**
  * subagent_invocations: every subagent dispatch from a parent session.
@@ -50,19 +52,42 @@ const JsonObjectSchema = z.record(z.string(), z.unknown());
 export function extractSubagentInvocations(db: DatabaseType): number {
   db.prepare(`DELETE FROM subagent_invocations`).run();
 
-  const rows = db
-    .prepare<[], ToolCallRow>(
-      `SELECT tc.session_id, tc.turn, tc.idx, tc.name, tc.args_json,
-              tc.output_preview, outputs.output_text
-         FROM tool_calls tc
-         LEFT JOIN tool_outputs outputs
-           ON outputs.session_id = tc.session_id
-          AND outputs.turn = tc.turn
-          AND outputs.idx = tc.idx
-        WHERE lower(tc.name) IN ('task', 'agent', 'subagent', 'spawn_agent')
-        ORDER BY tc.session_id, tc.turn, tc.idx`,
-    )
-    .all();
+  // Full tool output moved to a sibling archive. Only the handful of
+  // dispatch tool calls below need it, so this stays a keyed join rather than a
+  // payload scan; the blob is decoded per row in application code.
+  const rows: ToolCallRow[] = attachArchiveIfPresent(db, "tools")
+    ? db
+        .prepare<
+          [],
+          Omit<ToolCallRow, "output_text"> & {
+            output_payload: Uint8Array | null;
+          }
+        >(
+          `SELECT tc.session_id, tc.turn, tc.idx, tc.name, tc.args_json,
+                  tc.output_preview, outputs.payload AS output_payload
+             FROM tool_calls tc
+             LEFT JOIN ${archiveAlias("tools")}.tool_outputs outputs
+               ON outputs.session_id = tc.session_id
+              AND outputs.turn = tc.turn
+              AND outputs.idx = tc.idx
+            WHERE lower(tc.name) IN ('task', 'agent', 'subagent', 'spawn_agent')
+            ORDER BY tc.session_id, tc.turn, tc.idx`,
+        )
+        .all()
+        .map(({ output_payload, ...rest }) => ({
+          ...rest,
+          output_text:
+            output_payload === null ? null : decodePayload(output_payload),
+        }))
+    : db
+        .prepare<[], ToolCallRow>(
+          `SELECT tc.session_id, tc.turn, tc.idx, tc.name, tc.args_json,
+                  tc.output_preview, NULL AS output_text
+             FROM tool_calls tc
+            WHERE lower(tc.name) IN ('task', 'agent', 'subagent', 'spawn_agent')
+            ORDER BY tc.session_id, tc.turn, tc.idx`,
+        )
+        .all();
 
   // Pre-fetch child sessions keyed by direct parent. Stable ordering makes the
   // final best-effort fallback deterministic across SQLite query plans.

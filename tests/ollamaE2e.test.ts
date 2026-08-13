@@ -6,7 +6,7 @@ import { execa } from "execa";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { CanonicalSession } from "../src/adapters/types.js";
 import { type DatabaseType, openDb } from "../src/db/client.js";
-import { upsertSession } from "../src/db/writer.js";
+import { upsertSessionWithPayload } from "../src/db/writer.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -46,7 +46,7 @@ describeIfOllama("ollama embeddings e2e", () => {
     tempDir = mkdtempSync(join(tmpdir(), "agentmine-ollama-e2e-"));
     dbPath = join(tempDir, "test.db");
     db = openDb({ path: dbPath });
-    upsertSession(
+    upsertSessionWithPayload(
       db,
       makeSession({
         id: "cc--ollama-auth",
@@ -68,7 +68,7 @@ describeIfOllama("ollama embeddings e2e", () => {
         ],
       }),
     );
-    upsertSession(
+    upsertSessionWithPayload(
       db,
       makeSession({
         id: "cc--ollama-sqlite",

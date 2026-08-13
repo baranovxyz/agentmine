@@ -2,6 +2,10 @@ import { defineCommand } from "citty";
 import { Errors } from "../contract/errors.js";
 import { type CommandOutcome, runCommand } from "../contract/result.js";
 import { dbExists, openDb } from "../db/client.js";
+import {
+  extractionPendingWarnings,
+  readWithFreshnessSnapshot,
+} from "../db/freshness.js";
 import { parseSince } from "./_filters.js";
 
 type Data = Record<string, unknown>;
@@ -90,21 +94,26 @@ export const workflowsCommand = defineCommand({
             : "";
           params.push(limit);
 
-          const rows = db
-            .prepare<unknown[], Record<string, unknown>>(
-              `SELECT w.run_id, w.workflow_name, w.status, w.agent_count,
-                      w.total_tokens, w.total_tool_calls, w.duration_ms,
-                      w.started_at, w.summary, w.orchestrating_session_id,
-                      s.project_path
-                 FROM workflow_runs w
-                 LEFT JOIN sessions s ON s.id = w.orchestrating_session_id
-                 ${whereSql}
-                 ORDER BY ${orderBy}, w.run_id
-                 LIMIT ?`,
-            )
-            .all(...params)
-            .map(enrichRunRow);
-          return { data: { rows, limit, sort: sortKey } };
+          const { value: rows, freshness } = readWithFreshnessSnapshot(db, () =>
+            db
+              .prepare<unknown[], Record<string, unknown>>(
+                `SELECT w.run_id, w.workflow_name, w.status, w.agent_count,
+                          w.total_tokens, w.total_tool_calls, w.duration_ms,
+                          w.started_at, w.summary, w.orchestrating_session_id,
+                          s.project_path
+                     FROM workflow_runs w
+                     LEFT JOIN sessions s ON s.id = w.orchestrating_session_id
+                     ${whereSql}
+                     ORDER BY ${orderBy}, w.run_id
+                     LIMIT ?`,
+              )
+              .all(...params)
+              .map(enrichRunRow),
+          );
+          return {
+            data: { rows, limit, sort: sortKey },
+            warnings: extractionPendingWarnings(freshness),
+          };
         } finally {
           db.close();
         }
