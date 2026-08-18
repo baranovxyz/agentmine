@@ -45,6 +45,21 @@ export function getRuntimeInfo(): RuntimeInfo {
   };
 }
 
+export interface SelfInvocation {
+  command: string;
+  args: string[];
+  /**
+   * The file that identifies *Agentmine* in this invocation, as opposed to the
+   * interpreter running it. Under Node the command is the runtime, which a
+   * version manager may move for reasons that have nothing to do with this
+   * program, so anything asking "is my installation still the installed one"
+   * must ask about the entrypoint instead.
+   */
+  programPath: string;
+  /** Whether `programPath` is itself the executable that gets run. */
+  programIsExecutable: boolean;
+}
+
 export function resolveSelfInvocation(
   args: string[],
   snapshot: SelfInvocationSnapshot = {
@@ -53,9 +68,14 @@ export function resolveSelfInvocation(
     execArgv: process.execArgv,
     argv: process.argv,
   },
-): { command: string; args: string[] } {
+): SelfInvocation {
   if (snapshot.standalone) {
-    return { command: snapshot.execPath, args: [...args] };
+    return {
+      command: snapshot.execPath,
+      args: [...args],
+      programPath: snapshot.execPath,
+      programIsExecutable: true,
+    };
   }
   const entrypoint = snapshot.argv[1];
   if (!entrypoint) {
@@ -64,6 +84,8 @@ export function resolveSelfInvocation(
   return {
     command: snapshot.execPath,
     args: [...snapshot.execArgv, entrypoint, ...args],
+    programPath: entrypoint,
+    programIsExecutable: false,
   };
 }
 

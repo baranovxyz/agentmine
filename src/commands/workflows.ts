@@ -3,7 +3,7 @@ import { Errors } from "../contract/errors.js";
 import { type CommandOutcome, runCommand } from "../contract/result.js";
 import { dbExists, openDb } from "../db/client.js";
 import {
-  extractionPendingWarnings,
+  readCommandWarnings,
   readWithFreshnessSnapshot,
 } from "../db/freshness.js";
 import { parseSince } from "./_filters.js";
@@ -112,7 +112,7 @@ export const workflowsCommand = defineCommand({
           );
           return {
             data: { rows, limit, sort: sortKey },
-            warnings: extractionPendingWarnings(freshness),
+            warnings: readCommandWarnings(db, freshness),
           };
         } finally {
           db.close();

@@ -190,7 +190,14 @@ node dist/cli.js workflow <run_id>    # one run: rollups, ordered phases, per-ag
   `extract/scope.ts`), register in `extract/index.ts`. Add a synthetic-session
   test in `tests/`.
 - **New browse command:** new file in `src/commands/`, use
-  `runCommand({ command, handler })`, register in `main.ts`.
+  `runCommand({ command, handler })`, register in `main.ts`, **and declare it in
+  the agent-discovery manifest in `commands/schema.ts`** with its
+  `readOnlyHint` / `destructiveHint` / `idempotentHint` annotations. The
+  manifest is not optional and not cosmetic: `tests/smoke.test.ts` and
+  `tests/distSmoke.test.ts` assert it matches `--help` exactly, and a missing
+  entry fails as `expected [...] to deeply equal [Array(N)]` — which names
+  neither the command nor the manifest. A long-running command keeps the same
+  contract: JSON envelope on stdout, NDJSON progress on stderr.
 - **New embedding behavior:** keep `embed` agent-first: JSON stdout,
   NDJSON progress on stderr, dry-run first, bounded `--limit`, and
   source/project filters on semantic `similar`.

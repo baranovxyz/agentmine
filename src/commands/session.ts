@@ -4,7 +4,7 @@ import { type CommandOutcome, runCommand } from "../contract/result.js";
 import { archiveAlias, attachArchiveIfPresent } from "../db/archives.js";
 import { dbExists, openDb } from "../db/client.js";
 import {
-  extractionPendingWarnings,
+  readCommandWarnings,
   readWithFreshnessSnapshot,
 } from "../db/freshness.js";
 import { decodePayload } from "../db/payloadCodec.js";
@@ -156,7 +156,7 @@ export const sessionCommand = defineCommand({
               messages: slicedMessages,
               tool_calls: toolCalls,
             },
-            warnings: extractionPendingWarnings(snapshot.freshness),
+            warnings: readCommandWarnings(db, snapshot.freshness),
           };
         } finally {
           db.close();

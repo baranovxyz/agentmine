@@ -3,7 +3,7 @@ import { Errors } from "../contract/errors.js";
 import { type CommandOutcome, runCommand } from "../contract/result.js";
 import { dbExists, openDb } from "../db/client.js";
 import {
-  extractionPendingWarnings,
+  readCommandWarnings,
   readWithFreshnessSnapshot,
 } from "../db/freshness.js";
 
@@ -86,7 +86,7 @@ export const workflowCommand = defineCommand({
               phases,
               agents,
             },
-            warnings: extractionPendingWarnings(freshness),
+            warnings: readCommandWarnings(db, freshness),
           };
         } finally {
           db.close();

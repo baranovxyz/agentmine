@@ -10,7 +10,7 @@ import {
   parseStoredSchemaVersion,
 } from "../db/client.js";
 import {
-  extractionPendingWarnings,
+  readCommandWarnings,
   readWithFreshnessSnapshot,
 } from "../db/freshness.js";
 import { aggregateNgrams } from "../extract/ngrams.js";
@@ -1030,7 +1030,7 @@ function factOutcome(db: DatabaseType, read: () => Data): Outcome {
   const { value: data, freshness } = readWithFreshnessSnapshot(db, read);
   return {
     data,
-    warnings: extractionPendingWarnings(freshness),
+    warnings: readCommandWarnings(db, freshness),
   };
 }
 

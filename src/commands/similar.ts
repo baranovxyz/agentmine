@@ -6,7 +6,7 @@ import { runCommand } from "../contract/result.js";
 import type { DatabaseType } from "../db/client.js";
 import { dbExists, openDb } from "../db/client.js";
 import {
-  extractionPendingWarnings,
+  readCommandWarnings,
   readWithFreshnessSnapshot,
 } from "../db/freshness.js";
 import { deserializeVector } from "../embeddings/chunks.js";
@@ -281,7 +281,7 @@ export const similarCommand = defineCommand({
           let { modeSelection, mode } = snapshot.value;
           const freshnessWarnings =
             exclusionSeeds.length > 0
-              ? extractionPendingWarnings(snapshot.freshness)
+              ? readCommandWarnings(db, snapshot.freshness)
               : [];
 
           let embeddingRows: SimilarRow[] = [];

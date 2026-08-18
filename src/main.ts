@@ -1,6 +1,7 @@
 import { defineCommand, runMain } from "citty";
 import { backupCommand } from "./commands/backup.js";
 import { compactCommand } from "./commands/compact.js";
+import { daemonCommand } from "./commands/daemon.js";
 import { embedCommand } from "./commands/embed.js";
 import { extractCommand } from "./commands/extract.js";
 import { ftsCommand } from "./commands/fts.js";
@@ -36,6 +37,7 @@ const main = defineCommand({
     compact: compactCommand,
     sync: syncCommand,
     ingest: ingestCommand,
+    daemon: daemonCommand,
     normalize: normalizeCommand,
     extract: extractCommand,
     embed: embedCommand,

@@ -1,11 +1,10 @@
-import { spawn } from "node:child_process";
 import { defineCommand } from "citty";
 import { z } from "zod";
 import { CliError, Errors } from "../contract/errors.js";
 import { reportProgressImmediate } from "../contract/progress.js";
 import { runCommand } from "../contract/result.js";
 import { assertConfiguredCorpusReady } from "../db/client.js";
-import { resolveSelfInvocation } from "../runtime.js";
+import { type ChildResult, runSelf } from "../self-exec.js";
 
 const CHILD_DIAGNOSTIC_LIMIT = 500;
 
@@ -36,12 +35,6 @@ const childErrorEnvelopeSchema = z.object({
   errors: z.array(childCliErrorSchema).min(1),
   traceId: z.string(),
 });
-
-interface ChildResult {
-  exitCode: number | null;
-  stdout: string;
-  stderr: string;
-}
 
 export const ingestCommand = defineCommand({
   meta: {
@@ -128,26 +121,6 @@ async function runStep(
   }
   reportProgressImmediate("ingest.step.done", { step, duration_ms: duration });
   steps.push({ step, status: "success", duration_ms: duration });
-}
-
-function runSelf(args: string[]): Promise<ChildResult> {
-  return new Promise((resolve) => {
-    const invocation = resolveSelfInvocation(args);
-    const child = spawn(invocation.command, invocation.args, {
-      stdio: ["ignore", "pipe", "pipe"],
-      env: process.env,
-      shell: false,
-    });
-    let stdout = "";
-    let stderr = "";
-    child.stdout.on("data", (chunk: Buffer) => {
-      stdout += chunk.toString();
-    });
-    child.stderr.on("data", (chunk: Buffer) => {
-      stderr += chunk.toString();
-    });
-    child.on("close", (code) => resolve({ exitCode: code, stdout, stderr }));
-  });
 }
 
 /** Convert a failed child command into the error exposed by `agentmine ingest`. */
