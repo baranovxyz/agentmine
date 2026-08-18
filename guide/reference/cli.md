@@ -145,6 +145,28 @@ either happens. A supervised daemon then restarts into the current version by
 itself, so upgrading Agentmine never leaves your commands on one version and the
 process feeding their corpus on another.
 
+**Which install you supervise decides whether that works.** The daemon notices an
+upgrade by watching the program file it was started from, so it only sees one if
+your installer actually replaces that file:
+
+| Install | Upgrade behaviour |
+|---|---|
+| `npm install -g agentmine` | Detected. The package directory is replaced in place. |
+| A standalone executable you overwrite | Detected. One file, one path. |
+| `pnpm add -g agentmine` | **Not detected.** |
+
+pnpm stores each version in its own directory, repoints the launcher at the new
+one, and leaves the old directory behind — so nothing the running daemon can
+observe ever changes, and it keeps serving the version it started with while your
+commands report the new one. If you install with pnpm, restart the service
+yourself after upgrading (`systemctl --user restart agentmine-daemon.service`), or
+supervise a standalone executable instead.
+
+One more thing to know about the refusal: the check looks for a version-control
+repository anywhere *above* the program, so if you keep your home directory under
+git, every install path inside it is refused on those grounds. Pass
+`--allow-ephemeral-path` if that is your setup.
+
 ## Maintenance
 
 | Command | Purpose |
