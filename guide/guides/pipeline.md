@@ -49,6 +49,12 @@ The pipeline is designed to be safe to rerun:
 - `backup` snapshots the hot database and every existing payload archive before risky rebuilds
   (for example, before `normalize --force` or a schema rebuild).
 
+## Running it continuously
+
+Everything above describes bringing the corpus up to date *now*. To keep it up to date without
+being asked, run these same stages under `agentmine daemon` — see
+[Keeping the corpus current](daemon.md).
+
 ## No LLM in the default path
 
 The default `sync -> normalize -> extract` path calls no LLM. Optional local embedding requests
