@@ -158,6 +158,21 @@ export const Errors = {
       retryable: true,
     });
   },
+  /**
+   * A long-running process stopping because the installation it belongs to has
+   * moved on. Transient because the correct response is to run it again — which
+   * is exactly what a supervisor does with a non-zero exit, and why standing
+   * down is reported as a fault rather than a clean finish.
+   */
+  superseded(message: string): CliError {
+    return new CliError({
+      code: 3004,
+      name: "SUPERSEDED",
+      message,
+      category: "transient",
+      retryable: true,
+    });
+  },
 };
 
 export function wrapUnknown(err: unknown, contextMessage?: string): CliError {

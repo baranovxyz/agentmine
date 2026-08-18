@@ -11,7 +11,7 @@
     },
     {
       "path": "cli.js",
-      "sha256": "14efdf8cfbc3a0cc1c99cc4a76a443c6f1d2a6c0fc4c4242e7477318853b31ea",
+      "sha256": "e43c21c1063d791ce5828db7a36c5ede983ee646454f13054c75f91f2b800207",
       "size": 418,
       "executable": true
     },
@@ -22,9 +22,9 @@
       "executable": false
     },
     {
-      "path": "main-AA7YVTNA.js",
-      "sha256": "98b8d2c1beb9008a907120d362b18c5ef22b9352addd55b06726b0d93c0ca5c0",
-      "size": 354523,
+      "path": "main-T242V2RT.js",
+      "sha256": "6348353e360aefd6db1317fec8dbb7c5d7167afae31c76a7d2ddc1dd45b4a183",
+      "size": 399323,
       "executable": false
     }
   ]

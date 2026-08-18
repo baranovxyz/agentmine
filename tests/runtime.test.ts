@@ -13,6 +13,9 @@ describe("runtime self invocation", () => {
     ).toEqual({
       command: "/tmp/agentmine",
       args: ["sync"],
+      // A standalone build is its own program, so the two are the same file.
+      programPath: "/tmp/agentmine",
+      programIsExecutable: true,
     });
   });
 
@@ -27,6 +30,11 @@ describe("runtime self invocation", () => {
     ).toEqual({
       command: "/usr/bin/node",
       args: ["--import", "tsx", "/repo/src/cli.ts", "extract"],
+      // Under Node the command is the runtime, which a version manager may
+      // move for reasons unrelated to Agentmine, so the entrypoint is what
+      // identifies this installation.
+      programPath: "/repo/src/cli.ts",
+      programIsExecutable: false,
     });
   });
 

@@ -3,7 +3,7 @@ import { Errors } from "../contract/errors.js";
 import { runCommand } from "../contract/result.js";
 import { dbExists, openDb } from "../db/client.js";
 import {
-  extractionPendingWarnings,
+  readCommandWarnings,
   readWithFreshnessSnapshot,
 } from "../db/freshness.js";
 
@@ -53,7 +53,7 @@ export const queryCommand = defineCommand({
               limit,
               rows: capped ? rows.slice(0, limit) : rows,
             },
-            warnings: extractionPendingWarnings(freshness),
+            warnings: readCommandWarnings(db, freshness),
           };
         } catch (e) {
           throw Errors.invalidInput(`SQL error: ${(e as Error).message}`);

@@ -151,6 +151,15 @@ export const schemaCommand = defineCommand({
                 idempotentHint: true,
               },
             },
+            daemon: {
+              description:
+                "Continuously import local agent sessions so the corpus stays current; long-running, streams progress on stderr",
+              annotations: {
+                readOnlyHint: false,
+                destructiveHint: false,
+                idempotentHint: true,
+              },
+            },
             normalize: {
               description:
                 "Parse raw sessions into canonical SQLite tables; AGENTMINE_PROJECT_PATH_ALLOW filters project_path by comma-separated substrings",

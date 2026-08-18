@@ -1,5 +1,6 @@
 import type { CliWarning } from "../contract/result.js";
 import { type DatabaseType, getMeta, upsertMeta } from "./client.js";
+import { readSupervisionSnapshot, supervisionWarnings } from "./supervision.js";
 
 export const LAST_NORMALIZE_AT_META_KEY = "last_normalize_at";
 export const LAST_EXTRACT_AT_META_KEY = "last_extract_at";
@@ -128,6 +129,25 @@ export function extractionPendingWarnings(
       name: "EXTRACTION_PENDING",
       message: `Pending fact extraction covers ${pending}, so derived fact tables may be incomplete. Run \`agentmine extract\` before relying on fact-derived results.`,
     },
+  ];
+}
+
+/**
+ * Every warning a read command owes its caller about the state of the corpus
+ * behind the answer.
+ *
+ * One funnel on purpose. These are two different claims — whether derived facts
+ * have caught up, and whether the machine is still feeding the corpus at all —
+ * and a command that reported one but not the other would be silently wrong in
+ * whichever direction it forgot.
+ */
+export function readCommandWarnings(
+  db: DatabaseType,
+  freshness: FreshnessSnapshot,
+): CliWarning[] {
+  return [
+    ...extractionPendingWarnings(freshness),
+    ...supervisionWarnings(readSupervisionSnapshot(db)),
   ];
 }
 

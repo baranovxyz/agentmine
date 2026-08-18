@@ -3,6 +3,34 @@
 Notable Agentmine changes only. Keep this file short; detailed implementation notes belong in
 commit history and release notes.
 
+## 0.10.0 - 2026-08-18
+
+- Add `agentmine daemon`, which keeps the corpus current on its own by scanning
+  each session store at a cadence matched to how recently it was written, so a
+  location written moments ago is detected in seconds while a dormant one costs
+  nothing to watch. Imports settle before running and are dispatched at a ceiling
+  regardless, so a session being written continuously — the one most likely being
+  watched — still imports. Fact extraction runs on its own slower cadence with
+  its own ceiling. Only one daemon may run against a corpus; liveness is recorded
+  in the corpus itself, so a daemon that has stopped importing is distinguishable
+  from a machine with nothing to import.
+- Generate a systemd user unit or launchd agent for the daemon with
+  `--print-service` / `--install-service`. Generating writes a file and stops
+  there: enabling and removing stay the operator's, and the commands for both are
+  printed.
+- Refuse to generate a service definition naming a program that may not survive —
+  one inside a source-control checkout, linked into one, under the temporary
+  directory, or absent. A definition names its program permanently, so this
+  otherwise produces a service that fails silently while the corpus stops
+  advancing. `--allow-ephemeral-path` supervises a development build anyway.
+- Stand down when superseded. A running daemon detects that its own program was
+  replaced, or that a newer Agentmine migrated the corpus, and exits as a fault so
+  its supervisor restarts it into the current version — no packaging channel
+  restarts a per-user service, and a process that kept running would feed the
+  corpus from a version its own commands had left behind.
+- Warn `DAEMON_NOT_RUNNING` on read commands when a corpus with an installed
+  service definition has not been imported within the slowest detection bound.
+
 ## 0.9.0 - 2026-08-13
 
 - Move verbatim source events and complete tool output into compressed sibling SQLite archives,
