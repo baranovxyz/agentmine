@@ -70,6 +70,16 @@ The check looks for a version-control repository anywhere *above* the program, s
 home directory under git, every install path inside it is refused on those grounds.
 `--allow-ephemeral-path` is the answer there too.
 
+**The program a service definition names is whichever `agentmine` you were running when you
+generated it — not necessarily the one your shell resolves to afterward.** If you generate the
+definition from a standalone executable you downloaded separately, while your everyday terminal
+command comes from `npm i -g agentmine` (or the reverse), the two stay independent: upgrading one
+does nothing to the other, and the daemon keeps deriving facts for newly ingested sessions with
+whatever version's logic the program it supervises still has on disk. `agentmine daemon
+--print-service` reports the exact program path it would supervise (`program` in its JSON output)
+— check it against the install you plan to upgrade before assuming the upgrade covers the daemon
+too.
+
 ## Upgrades
 
 A running daemon keeps the version it started with, and no package manager restarts a per-user
@@ -93,6 +103,11 @@ old directory behind — so nothing the running daemon can observe ever changes,
 the version it started with while your commands report the new one. If you install with pnpm,
 restart the service yourself after upgrading
 (`systemctl --user restart agentmine-daemon.service`), or supervise a standalone executable instead.
+
+Once the daemon is back on the current version — whether restarted automatically or by hand — newly
+ingested sessions get derived with the current logic. Sessions it already processed under the old
+version don't retroactively correct themselves; see [Upgrading](upgrading.md) for whether that needs
+a manual `agentmine extract --force` or happens automatically on the next ordinary `extract`.
 
 ## When something looks wrong
 

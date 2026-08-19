@@ -54,6 +54,21 @@ the warning.
 The warning does not change the result rows, exit code, or status. Treat derived fact results as
 incomplete until `agentmine extract` succeeds; normalized-session commands can still be used.
 
+The same commands also add a `FACTS_FROM_OLDER_VERSION` warning when a full rebuild of the fact
+tables is scheduled and has not run yet. This is a distinct staleness signal from
+`EXTRACTION_PENDING`: the dirty-session tracker only knows about new or changed inputs, not about a
+code change that reinterprets inputs it already processed. A full rebuild is scheduled by an
+agentmine upgrade whose fact-derivation logic changed — the underlying migration clears the
+incremental-extract marker, which is what makes the next ordinary `agentmine extract` rebuild
+everything rather than just what changed. The warning is deliberately NOT keyed on the recorded
+extraction version differing from the running one: that would fire on every release, including ones
+that changed no derivation at all, training callers to ignore it. `data.freshness` still reports
+`last_extract_version` (the version that last fully populated the fact tables) for diagnosis, and
+folds the scheduled rebuild into `facts_current`, so existing consumers of that boolean see it go
+stale without any change on their part. Run plain `agentmine extract` to clear it — `--force` is not
+needed, because the missing marker already forces that run to rebuild the whole corpus rather than
+just the sessions changed since the last run.
+
 ## Schema discovery
 
 Run `agentmine schema` to inspect the result-envelope schema, exit codes, and top-level command

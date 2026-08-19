@@ -3,6 +3,30 @@
 Notable Agentmine changes only. Keep this file short; detailed implementation notes belong in
 commit history and release notes.
 
+## 0.11.1 - 2026-08-19
+
+Upgrading from 0.11.0 or earlier needs no manual step. Opening a corpus with this version schedules
+the rebuild that 0.11.0's derivation change required, and the next ordinary `agentmine extract`
+performs it.
+
+- Treat a change in how facts are derived as a corpus migration. 0.11.0 changed what several fact
+  tables contain without changing their shape, and nothing detected that: the corpus reported its
+  facts as current while they had been built by superseded logic, and the only instruction to rebuild
+  them lived in these release notes. A corpus now reconciles itself on the next ordinary run.
+- Stand down a running daemon whose corpus has been migrated past the version it supports, so a
+  long-running process cannot keep deriving new sessions with logic the rest of the install has
+  replaced.
+- Report a scheduled rebuild rather than assuming facts are current. A corpus with a pending
+  rebuild now says so wherever freshness is reported, names the command that performs it, and
+  records which version last derived its fact tables — so a change of this kind announces itself
+  instead of being noticed downstream. An upgrade that changes no derivation stays quiet.
+- Run data migrations for every corpus. They were previously skipped entirely for any corpus that had
+  never ingested Codex sessions, because a guard meant for the Codex-specific repairs sat in front of
+  all of them.
+
+If you already upgraded to 0.11.0 and ran nothing since, this release repairs the corpus for you on
+its next run. To repair it immediately: `agentmine backup`, then `agentmine extract --force`.
+
 ## 0.11.0 - 2026-08-19
 
 **Existing corpora need `agentmine extract --force` after upgrading.** This release changes what

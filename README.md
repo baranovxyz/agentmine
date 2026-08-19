@@ -79,17 +79,10 @@ The final command reports `bun-standalone`, the platform target, Bun version, an
 commit in Agentmine's JSON envelope. The macOS executables are not claimed to be Apple-notarized or
 platform-signed.
 
-When upgrading an existing 0.8.x corpus, inspect and apply the one-time storage split before any
-normal corpus command:
-
-```bash
-agentmine compact --dry-run
-agentmine compact
-```
-
-The migration is resumable and checks available disk space before writing. Agentmine 0.9 refuses
-normal corpus commands until it completes; `agentmine backup` remains available as the recovery
-step before migration.
+Upgrading an existing installation or corpus — including the one-time 0.8.x -> 0.9 storage-split
+migration, and what a version upgrade means for already-derived fact tables — is covered in
+[Upgrading](guide/guides/upgrading.md). See [CHANGELOG.md](CHANGELOG.md) for the full release
+history, including which releases changed fact-derivation logic.
 
 Or from source:
 
@@ -163,6 +156,8 @@ and published at [agentmine.io](https://agentmine.io):
   imports, and the project-path allowlist.
 - [The pipeline](guide/guides/pipeline.md) — how `sync → normalize → extract`
   works and why every step is safe to rerun.
+- [Upgrading](guide/guides/upgrading.md) — how to upgrade each install method and when a corpus
+  needs its fact tables rebuilt.
 - [Similarity search](guide/guides/similarity-search.md) — `agentmine similar`
   and optional local embeddings.
 - [Redaction & privacy](guide/guides/redaction.md) — searchable-text redaction and sensitive
@@ -173,6 +168,7 @@ and published at [agentmine.io](https://agentmine.io):
   [Agent CLI contract](guide/reference/agent-contract.md)
 - [Architecture](https://github.com/baranovxyz/agentmine/blob/main/ARCHITECTURE.md) — internals
   and module contracts.
+- [Changelog](CHANGELOG.md) — release notes, including releases that change fact-derivation logic.
 
 ## Development
 

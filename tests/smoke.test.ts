@@ -25,6 +25,7 @@ import {
 import {
   CODEX_LINEAGE_BACKFILL_META_KEY,
   CODEX_TOKEN_USAGE_BACKFILL_META_KEY,
+  CURRENT_SCHEMA_VERSION,
   getMeta,
   openDb,
   upsertMeta,
@@ -2161,7 +2162,9 @@ describe("cli envelope", () => {
       expect(
         getMeta(migrated, CODEX_LINEAGE_BACKFILL_META_KEY),
       ).toBeUndefined();
-      expect(getMeta(migrated, "schema_version")).toBe("16");
+      expect(getMeta(migrated, "schema_version")).toBe(
+        String(CURRENT_SCHEMA_VERSION),
+      );
       migrated.close();
       rmSync(dir, { recursive: true, force: true });
     },
@@ -2235,7 +2238,9 @@ describe("cli envelope", () => {
     expect(synced.exitCode).toBe(0);
 
     const migrated = openDb({ readonly: true, init: false, path: dbPath });
-    expect(getMeta(migrated, "schema_version")).toBe("16");
+    expect(getMeta(migrated, "schema_version")).toBe(
+      String(CURRENT_SCHEMA_VERSION),
+    );
     expect(getMeta(migrated, CODEX_TOKEN_USAGE_BACKFILL_META_KEY)).toBe("1");
     expect(
       migrated

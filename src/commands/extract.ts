@@ -2,10 +2,17 @@ import { defineCommand } from "citty";
 import { Errors } from "../contract/errors.js";
 import { reportProgressImmediate } from "../contract/progress.js";
 import { runCommand } from "../contract/result.js";
-import { dbExists, getMeta, openDb, upsertMeta } from "../db/client.js";
+import {
+  dbExists,
+  EXTRACT_READY_META_KEY,
+  getMeta,
+  openDb,
+  upsertMeta,
+} from "../db/client.js";
 import {
   clearWorkflowExtractionPending,
   recordExtractSuccess,
+  recordExtractVersion,
   workflowExtractionIsPending,
 } from "../db/freshness.js";
 import { withWriteLock } from "../db/lock.js";
@@ -16,13 +23,13 @@ import {
 } from "../db/writer.js";
 import { runAllExtractors } from "../extract/index.js";
 import { extractWorkflowRuns } from "../extract/workflows.js";
+import { VERSION } from "../version.js";
 
 /**
  * Marker set after any full rebuild. Its absence means the corpus predates
  * incremental extract (or was never extracted), so the first run must be a full
  * rebuild before the dirty-set can be trusted.
  */
-const EXTRACT_READY_META_KEY = "extract_incremental_ready";
 
 export const extractCommand = defineCommand({
   meta: {
@@ -62,6 +69,10 @@ export const extractCommand = defineCommand({
                 clearWorkflowExtractionPending(db);
                 upsertMeta(db, EXTRACT_READY_META_KEY, "1");
                 recordExtractSuccess(db);
+                // Only a whole-corpus rebuild can honestly claim every fact
+                // row now reflects this version's derivation logic — an
+                // incremental run below only touches the dirty subset.
+                recordExtractVersion(db, VERSION);
                 return { counts, scope: "full" as const, sessions_scoped: 0 };
               }
 

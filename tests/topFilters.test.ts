@@ -9,6 +9,7 @@ import type { CanonicalSession } from "../src/adapters/types.js";
 import { parseSince, parseUntil } from "../src/commands/_filters.js";
 import {
   CODEX_TOKEN_USAGE_BACKFILL_META_KEY,
+  CURRENT_SCHEMA_VERSION,
   getMeta,
   openDb,
   upsertMeta,
@@ -844,8 +845,11 @@ describe("agentmine top tokens", () => {
   });
 
   it("refuses a future corpus schema without changing it", async () => {
+    // One past what this build supports, so the case stays "future" across
+    // every schema bump rather than becoming the current version.
+    const futureVersion = String(CURRENT_SCHEMA_VERSION + 1);
     const db = openDb({ path: dbPath });
-    upsertMeta(db, "schema_version", "17");
+    upsertMeta(db, "schema_version", futureVersion);
     db.close();
 
     const { exitCode, stdout } = await runCli(
@@ -858,7 +862,9 @@ describe("agentmine top tokens", () => {
       errors: [
         {
           name: "DB_ERROR",
-          message: expect.stringContaining("schema version 17 is newer"),
+          message: expect.stringContaining(
+            `schema version ${futureVersion} is newer`,
+          ),
         },
       ],
     });

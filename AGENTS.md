@@ -94,6 +94,19 @@ node dist/cli.js workflow <run_id>    # one run: rollups, ordered phases, per-ag
   `src/db/schemaText.ts` is its bundled copy. Edit both, in the same
   commit. If the change is breaking, bump `SCHEMA_VERSION` in
   `src/db/client.ts`.
+- **A derivation change is a schema change.** `CURRENT_SCHEMA_VERSION`
+  covers what stored values MEAN, not just the column layout: change how a fact is
+  derived and every existing row disagrees with the code reading it, while nothing
+  else notices — the version gate only refuses an OLD binary on a NEW corpus, and
+  freshness only tracks "normalized but not yet extracted", so the corpus reports
+  `facts_current: true` over stale rows and a running daemon keeps writing more.
+  So bump the version AND add a migration in `applyDataMigrations` invalidating the
+  least that forces re-derivation (usually just `deleteMeta(EXTRACT_READY_META_KEY)`,
+  which makes the next ordinary `extract` rebuild — do NOT null `content_hash` for an
+  extract-side change, that re-parses the whole corpus to produce identical rows).
+  The same bump makes a stale daemon stand down. Keep source-specific guards INSIDE
+  their own blocks: a guard at the top of `applyDataMigrations` skips every later
+  migration for corpora lacking that source.
 - **Lossless ingest is intentional.** Adapters should preserve raw source
   events and full untruncated tool output when the source provides it. Keep
   previews in `tool_calls` bounded for browsing, but do not throw away
