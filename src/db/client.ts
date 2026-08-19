@@ -8,11 +8,23 @@ import { Database } from "./sqlite.js";
 
 type DatabaseType = Database;
 
-export const CURRENT_SCHEMA_VERSION = 16;
+/**
+ * Bumped for a change in the SHAPE of stored data, and also for a change in how
+ * stored values are DERIVED. A derivation change leaves the schema identical
+ * while making every existing row disagree with the code that reads it, and the
+ * version is the only signal that reaches an installed corpus: it drives the
+ * data migrations below, and it is what tells a running daemon that another
+ * installation has moved the corpus past what it supports. A derivation change
+ * shipped without a bump is silent -- the corpus keeps reporting its facts as
+ * current while they were built by superseded logic.
+ */
+export const CURRENT_SCHEMA_VERSION = 17;
 const SCHEMA_VERSION = String(CURRENT_SCHEMA_VERSION);
 export const CODEX_LINEAGE_BACKFILL_META_KEY = "codex_lineage_backfill_pending";
 export const CODEX_TOKEN_USAGE_BACKFILL_META_KEY =
   "codex_token_usage_backfill_pending";
+/** Cleared to make the next ordinary `extract` rebuild every fact table. */
+export const EXTRACT_READY_META_KEY = "extract_incremental_ready";
 
 /** Defensive busy timeout (ms); generous vs. our short transactions. See db/lock.ts. */
 const BUSY_TIMEOUT_MS = 15_000;
@@ -145,6 +157,26 @@ function applyDataMigrations(db: DatabaseType): void {
 
   if (!tableExists(db, "sessions")) return;
 
+  if (currentVersion < 17) {
+    // Shell-derived facts are now read from a parse of the whole command rather
+    // than matched within its text, so every `shell_commands`, `git_operations`,
+    // `friction_events`, and commit-status row built before this point disagrees
+    // with the code that reads it. The schema is untouched, so nothing else here
+    // would notice.
+    //
+    // Clearing the incremental-extract marker is the whole migration: the next
+    // ordinary `extract` sees no ready flag and rebuilds every fact table, which
+    // is exactly what a full re-derivation needs. Deliberately NOT invalidating
+    // `content_hash` the way the Codex migrations below do -- this change is
+    // extract-side only, so forcing a re-normalize would re-parse every
+    // transcript in the corpus to produce identical rows.
+    deleteMeta(db, EXTRACT_READY_META_KEY);
+  }
+
+  // Everything below repairs Codex rows specifically; a corpus without them has
+  // nothing to do. This guard stays scoped to those migrations -- hoisting it
+  // above would silently skip every future migration for the many corpora that
+  // have never ingested Codex.
   const legacyCodexSessions =
     db
       .prepare<[], { count: number }>(
@@ -276,6 +308,10 @@ export function upsertMeta(db: DatabaseType, key: string, value: string): void {
     `INSERT INTO meta (key, value) VALUES (?, ?)
      ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
   ).run(key, value);
+}
+
+export function deleteMeta(db: DatabaseType, key: string): void {
+  db.prepare(`DELETE FROM meta WHERE key = ?`).run(key);
 }
 
 export function getMeta(db: DatabaseType, key: string): string | undefined {

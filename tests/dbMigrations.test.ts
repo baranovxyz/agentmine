@@ -7,6 +7,7 @@ import {
   CODEX_LINEAGE_BACKFILL_META_KEY,
   CODEX_TOKEN_USAGE_BACKFILL_META_KEY,
   CURRENT_SCHEMA_VERSION,
+  EXTRACT_READY_META_KEY,
   getMeta,
   openDb,
   upsertMeta,
@@ -28,7 +29,12 @@ describe("Agentmine data migrations", () => {
     dirs.push(dir);
     const db = openDb({ path: join(dir, "sessions.db") });
     try {
-      expect(getMeta(db, "schema_version")).toBe("16");
+      // Derived, not literal: a hardcoded number here has to be edited on every
+      // bump, and being wrong looks like a migration failure rather than stale
+      // test data.
+      expect(getMeta(db, "schema_version")).toBe(
+        String(CURRENT_SCHEMA_VERSION),
+      );
       expect(getMeta(db, CODEX_LINEAGE_BACKFILL_META_KEY)).toBeUndefined();
       expect(getMeta(db, CODEX_TOKEN_USAGE_BACKFILL_META_KEY)).toBeUndefined();
     } finally {
@@ -87,7 +93,9 @@ describe("Agentmine data migrations", () => {
       expect(sessionIsUpToDate(migrated, "cc--root", "claude-hash")).toBe(true);
       expect(getMeta(migrated, CODEX_LINEAGE_BACKFILL_META_KEY)).toBe("1");
       expect(getMeta(migrated, CODEX_TOKEN_USAGE_BACKFILL_META_KEY)).toBe("1");
-      expect(getMeta(migrated, "schema_version")).toBe("16");
+      expect(getMeta(migrated, "schema_version")).toBe(
+        String(CURRENT_SCHEMA_VERSION),
+      );
     } finally {
       migrated.close();
     }
@@ -132,7 +140,9 @@ describe("Agentmine data migrations", () => {
         getMeta(migrated, CODEX_LINEAGE_BACKFILL_META_KEY),
       ).toBeUndefined();
       expect(getMeta(migrated, CODEX_TOKEN_USAGE_BACKFILL_META_KEY)).toBe("1");
-      expect(getMeta(migrated, "schema_version")).toBe("16");
+      expect(getMeta(migrated, "schema_version")).toBe(
+        String(CURRENT_SCHEMA_VERSION),
+      );
     } finally {
       migrated.close();
     }
@@ -163,7 +173,9 @@ describe("Agentmine data migrations", () => {
           .get(),
       ).toEqual({ content_hash: null, input_tokens: null });
       expect(getMeta(migrated, CODEX_TOKEN_USAGE_BACKFILL_META_KEY)).toBe("1");
-      expect(getMeta(migrated, "schema_version")).toBe("16");
+      expect(getMeta(migrated, "schema_version")).toBe(
+        String(CURRENT_SCHEMA_VERSION),
+      );
     } finally {
       migrated.close();
     }
@@ -173,16 +185,19 @@ describe("Agentmine data migrations", () => {
     const dir = mkdtempSync(join(tmpdir(), "agentmine-future-version-"));
     dirs.push(dir);
     const dbPath = join(dir, "sessions.db");
+    // One past whatever this build supports, so the test keeps testing "future"
+    // across every schema bump instead of pinning a number that becomes current.
+    const futureVersion = String(CURRENT_SCHEMA_VERSION + 1);
     const future = new DatabaseSync(dbPath);
     future.exec(`
       PRAGMA journal_mode = DELETE;
       CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-      INSERT INTO meta (key, value) VALUES ('schema_version', '17');
+      INSERT INTO meta (key, value) VALUES ('schema_version', '${futureVersion}');
     `);
     future.close();
 
     expect(() => openDb({ readonly: true, init: false, path: dbPath })).toThrow(
-      /schema version 17 is newer/u,
+      new RegExp(`schema version ${futureVersion} is newer`, "u"),
     );
 
     // The refusal must be self-diagnosing: name the running binary's version
@@ -195,7 +210,7 @@ describe("Agentmine data migrations", () => {
       caught = error;
     }
     const message = caught instanceof Error ? caught.message : String(caught);
-    expect(message).toContain("schema version 17 is newer");
+    expect(message).toContain(`schema version ${futureVersion} is newer`);
     expect(message).toContain(
       `this Agentmine build supports (${CURRENT_SCHEMA_VERSION})`,
     );
@@ -208,7 +223,7 @@ describe("Agentmine data migrations", () => {
       check
         .prepare(`SELECT value FROM meta WHERE key = 'schema_version'`)
         .get(),
-    ).toEqual({ value: "17" });
+    ).toEqual({ value: futureVersion });
     expect(check.prepare(`PRAGMA journal_mode`).get()).toEqual({
       journal_mode: "delete",
     });
@@ -242,5 +257,74 @@ describe("Agentmine data migrations", () => {
       journal_mode: "delete",
     });
     check.close();
+  });
+
+  it("makes the next ordinary extract rebuild every fact table after a derivation change", () => {
+    // The 0.11.0 shape: a corpus fully extracted by an earlier version, whose
+    // schema is untouched. Without this migration nothing marks it stale, so it
+    // reports its facts as current while they were derived by superseded logic.
+    const dir = mkdtempSync(join(tmpdir(), "agentmine-derivation-migration-"));
+    dirs.push(dir);
+    const dbPath = join(dir, "sessions.db");
+
+    const legacy = openDb({ path: dbPath });
+    upsertMeta(legacy, "schema_version", "16");
+    upsertMeta(legacy, EXTRACT_READY_META_KEY, "1");
+    legacy.close();
+
+    const upgraded = openDb({ path: dbPath });
+    try {
+      expect(getMeta(upgraded, EXTRACT_READY_META_KEY)).toBeUndefined();
+      expect(getMeta(upgraded, "schema_version")).toBe(
+        String(CURRENT_SCHEMA_VERSION),
+      );
+    } finally {
+      upgraded.close();
+    }
+  });
+
+  it("runs the derivation migration for a corpus that has never ingested Codex", () => {
+    // The Codex-specific backfills below it are guarded on a Codex row existing.
+    // That guard used to sit above every migration, which would have skipped
+    // this one for the many corpora that have no Codex sessions at all.
+    const dir = mkdtempSync(join(tmpdir(), "agentmine-no-codex-migration-"));
+    dirs.push(dir);
+    const dbPath = join(dir, "sessions.db");
+
+    const legacy = openDb({ path: dbPath });
+    upsertMeta(legacy, "schema_version", "16");
+    upsertMeta(legacy, EXTRACT_READY_META_KEY, "1");
+    expect(
+      legacy
+        .prepare(`SELECT COUNT(*) AS n FROM sessions WHERE source = 'codex'`)
+        .get(),
+    ).toEqual({ n: 0 });
+    legacy.close();
+
+    const upgraded = openDb({ path: dbPath });
+    try {
+      expect(getMeta(upgraded, EXTRACT_READY_META_KEY)).toBeUndefined();
+    } finally {
+      upgraded.close();
+    }
+  });
+
+  it("leaves an already-current corpus alone", () => {
+    const dir = mkdtempSync(join(tmpdir(), "agentmine-current-migration-"));
+    dirs.push(dir);
+    const dbPath = join(dir, "sessions.db");
+
+    const first = openDb({ path: dbPath });
+    upsertMeta(first, EXTRACT_READY_META_KEY, "1");
+    first.close();
+
+    // Reopening at the same version must not discard the incremental marker --
+    // otherwise every open would force a full rebuild.
+    const second = openDb({ path: dbPath });
+    try {
+      expect(getMeta(second, EXTRACT_READY_META_KEY)).toBe("1");
+    } finally {
+      second.close();
+    }
   });
 });

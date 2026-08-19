@@ -37,6 +37,15 @@ those pending signals as `data.freshness`; `query` and fact-backed browse comman
 non-mutating while preventing a recent normalized date from being mistaken for complete derived
 facts.
 
+Freshness is not only about newly normalized content waiting on its first extraction. A fact or
+pattern table can also be stale because it was built by an older Agentmine version whose
+derivation logic has since changed — upgrading the program does not retroactively correct rows an
+earlier version already wrote. The same read commands add a `FACTS_FROM_OLDER_VERSION` warning in
+that case, naming `agentmine extract --force` as the recovery. Opening a corpus with a newer
+Agentmine invalidates the stale incremental-extract marker automatically, so a routine `agentmine
+extract` after upgrading typically rebuilds affected fact tables on its own — see
+[Upgrading](upgrading.md) for when `--force` is still needed.
+
 ## Safe to rerun
 
 The pipeline is designed to be safe to rerun:

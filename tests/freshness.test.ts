@@ -14,17 +14,26 @@ import { afterEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 import type { CanonicalSession } from "../src/adapters/types.js";
 import { ingestWorkflowRuns } from "../src/adapters/workflowRaw.js";
-import { getMeta, openDb, upsertMeta } from "../src/db/client.js";
 import {
+  EXTRACT_READY_META_KEY,
+  getMeta,
+  openDb,
+  upsertMeta,
+} from "../src/db/client.js";
+import {
+  factsFromOlderVersionWarnings,
   LAST_EXTRACT_AT_META_KEY,
+  LAST_EXTRACT_VERSION_META_KEY,
   LAST_NORMALIZE_AT_META_KEY,
   readFreshnessSnapshot,
   readWithFreshnessSnapshot,
   recordExtractSuccess,
+  recordExtractVersion,
   recordNormalizeSuccess,
   WORKFLOW_EXTRACT_PENDING_META_KEY,
 } from "../src/db/freshness.js";
 import { upsertSessionWithPayload } from "../src/db/writer.js";
+import { VERSION } from "../src/version.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -41,6 +50,8 @@ const warningSchema = z.object({
 const freshnessSchema = z.object({
   last_normalize_at: z.string().nullable(),
   last_extract_at: z.string().nullable(),
+  last_extract_version: z.string().nullable(),
+  full_rebuild_pending: z.boolean(),
   pending_extraction_sessions: z.number(),
   workflow_extraction_pending: z.boolean(),
   oldest_pending_session_started_at: z.string().nullable(),
@@ -137,11 +148,16 @@ describe("freshness snapshot", () => {
     expect(readFreshnessSnapshot(db)).toEqual({
       last_normalize_at: null,
       last_extract_at: null,
+      last_extract_version: null,
       pending_extraction_sessions: 0,
       workflow_extraction_pending: false,
       oldest_pending_session_started_at: null,
       newest_pending_session_started_at: null,
-      facts_current: true,
+      // No full extract has ever run on this corpus, so the incremental
+      // marker (EXTRACT_READY_META_KEY) is absent — a full rebuild is
+      // pending, and facts are not current.
+      full_rebuild_pending: true,
+      facts_current: false,
     });
 
     upsertSessionWithPayload(db, makeSession("older", 1_700_000_000));
@@ -152,10 +168,12 @@ describe("freshness snapshot", () => {
     expect(readFreshnessSnapshot(db)).toEqual({
       last_normalize_at: "2026-08-11T01:02:03.000Z",
       last_extract_at: "2026-08-11T02:03:04.000Z",
+      last_extract_version: null,
       pending_extraction_sessions: 2,
       workflow_extraction_pending: false,
       oldest_pending_session_started_at: "2023-11-14T22:13:20.000Z",
       newest_pending_session_started_at: "2023-11-14T22:15:00.000Z",
+      full_rebuild_pending: true,
       facts_current: false,
     });
     db.close();
@@ -205,9 +223,13 @@ describe("freshness snapshot", () => {
       pending_extraction_sessions: 1,
       facts_current: false,
     });
+    // Dirty count reached 0, but no full extract ever ran on this corpus —
+    // still not current, because the incremental marker was never set (a
+    // full rebuild is still pending).
     expect(readFreshnessSnapshot(writer)).toMatchObject({
       pending_extraction_sessions: 0,
-      facts_current: true,
+      full_rebuild_pending: true,
+      facts_current: false,
     });
     reader.close();
     writer.close();
@@ -265,9 +287,16 @@ describe("freshness snapshot", () => {
     });
 
     const checked = openDb({ readonly: true, init: false, path: dbPath });
+    // The incremental marker was pre-set to "1" before this test's
+    // workflow-only change, and a workflow-only extract doesn't touch it
+    // (nor last_extract_version — only a full rebuild does) — no full
+    // rebuild is scheduled, so this corpus is genuinely current once
+    // nothing is pending.
     expect(readFreshnessSnapshot(checked)).toMatchObject({
       pending_extraction_sessions: 0,
       workflow_extraction_pending: false,
+      full_rebuild_pending: false,
+      last_extract_version: null,
       facts_current: true,
     });
     expect(
@@ -655,6 +684,164 @@ describe("normalize freshness lifecycle", () => {
         oldNormalizeTimestamp,
       );
       afterNoOp.close();
+    },
+    CLI_TEST_TIMEOUT,
+  );
+});
+
+describe("facts-from-older-version warning", () => {
+  it("does not warn when the incremental-extract marker is present, even if the recorded version differs from the running one", () => {
+    const dbPath = join(makeTempDir(), "sessions.db");
+    const db = openDb({ path: dbPath });
+    // A full extract ran under an older version, and no derivation-changing
+    // migration has cleared EXTRACT_READY_META_KEY since (an ordinary
+    // release bump, e.g. a pure bugfix that touched no derivation logic).
+    // This is the false-positive case that motivated keying the warning
+    // off the marker instead of version equality: a warning here would
+    // cry wolf on every release, training consumers to ignore it.
+    upsertMeta(db, EXTRACT_READY_META_KEY, "1");
+    recordExtractVersion(db, "0.10.0");
+
+    const freshness = readFreshnessSnapshot(db);
+    expect(freshness).toMatchObject({
+      last_extract_version: "0.10.0",
+      full_rebuild_pending: false,
+      facts_current: true,
+    });
+    expect(factsFromOlderVersionWarnings(freshness)).toEqual([]);
+    db.close();
+  });
+
+  it("warns and reports facts not current when the incremental-extract marker is absent (a scheduled full rebuild)", () => {
+    const dbPath = join(makeTempDir(), "sessions.db");
+    const db = openDb({ path: dbPath });
+    // A derivation-changing migration deletes EXTRACT_READY_META_KEY (see
+    // AGENTS.md) rather than bumping last_extract_version itself —
+    // the marker's absence is what schedules the next ordinary `extract` to
+    // do a full rebuild. Simulate a corpus that was fully extracted once
+    // (so it has a recorded version) and then hit such a migration.
+    recordExtractVersion(db, "0.10.0");
+    // EXTRACT_READY_META_KEY intentionally never set: marker absent.
+
+    const freshness = readFreshnessSnapshot(db);
+    expect(freshness).toMatchObject({
+      last_extract_version: "0.10.0",
+      full_rebuild_pending: true,
+      facts_current: false,
+    });
+    const warnings = factsFromOlderVersionWarnings(freshness);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toMatchObject({ name: "FACTS_FROM_OLDER_VERSION" });
+    expect(warnings[0]?.message).toContain("0.10.0");
+    // The cleared marker already forces the next `extract` to run full, so
+    // the recovery must not tell the user to add `--force`.
+    expect(warnings[0]?.message).toContain("agentmine extract");
+    expect(warnings[0]?.message).not.toContain("--force");
+    db.close();
+  });
+
+  it(
+    "clears the scheduled rebuild and its warning on a full extract, and every freshness-warning command inherits the wiring with no per-command change",
+    async () => {
+      const dbPath = join(makeTempDir(), "sessions.db");
+      const db = openDb({ path: dbPath });
+      upsertSessionWithPayload(db, makeSession("v-check", 1_700_000_000, true));
+      db.close();
+
+      const extracted = await runCli(["extract"], dbPath);
+      expect(extracted.exitCode, extracted.stdout).toBe(0);
+      expect(
+        commandEnvelopeSchema.parse(JSON.parse(extracted.stdout.trim())).data,
+      ).toMatchObject({ scope: "full" });
+
+      const checked = openDb({ readonly: true, init: false, path: dbPath });
+      expect(getMeta(checked, LAST_EXTRACT_VERSION_META_KEY)).toBe(VERSION);
+      expect(readFreshnessSnapshot(checked)).toMatchObject({
+        last_extract_version: VERSION,
+        full_rebuild_pending: false,
+        facts_current: true,
+      });
+      checked.close();
+
+      const freshStats = await runCli(["stats"], dbPath);
+      expect(freshStats.exitCode).toBe(0);
+      expect(
+        warningNames(
+          statsEnvelopeSchema.parse(JSON.parse(freshStats.stdout.trim()))
+            .warnings,
+        ),
+      ).not.toContain("FACTS_FROM_OLDER_VERSION");
+
+      // Simulate a derivation-changing migration on the corpus's next open:
+      // it deletes EXTRACT_READY_META_KEY, scheduling a full rebuild. This
+      // is what actually triggers the warning -- not the recorded version
+      // by itself, which stays unchanged here.
+      const migrated = openDb({ path: dbPath });
+      migrated
+        .prepare(`DELETE FROM meta WHERE key = ?`)
+        .run(EXTRACT_READY_META_KEY);
+      migrated.close();
+
+      const [staleStats, staleQuery, staleTop, staleSessions] =
+        await Promise.all([
+          runCli(["stats"], dbPath),
+          runCli(
+            ["query", "SELECT COUNT(*) AS count FROM shell_commands"],
+            dbPath,
+          ),
+          runCli(["top", "commands"], dbPath),
+          runCli(["sessions"], dbPath),
+        ]);
+      for (const result of [staleStats, staleQuery, staleTop, staleSessions]) {
+        expect(result.exitCode).toBe(0);
+        const envelope = commandEnvelopeSchema.parse(
+          JSON.parse(result.stdout.trim()),
+        );
+        expect(warningNames(envelope.warnings)).toContain(
+          "FACTS_FROM_OLDER_VERSION",
+        );
+      }
+
+      const staleStatsEnvelope = statsEnvelopeSchema.parse(
+        JSON.parse(staleStats.stdout.trim()),
+      );
+      expect(staleStatsEnvelope.data.freshness).toMatchObject({
+        last_extract_version: VERSION, // unchanged: still the version of the last full rebuild
+        full_rebuild_pending: true,
+        facts_current: false,
+      });
+      const staleWarning = staleStatsEnvelope.warnings?.find(
+        (warning) => warning.name === "FACTS_FROM_OLDER_VERSION",
+      );
+      expect(staleWarning?.message).toContain("agentmine extract");
+      expect(staleWarning?.message).not.toContain("--force");
+
+      // An ordinary (non --force) extract clears the scheduled rebuild: the
+      // marker's absence alone is what makes the next extract run full.
+      const cleared = await runCli(["extract"], dbPath);
+      expect(cleared.exitCode, cleared.stdout).toBe(0);
+      expect(
+        commandEnvelopeSchema.parse(JSON.parse(cleared.stdout.trim())).data,
+      ).toMatchObject({ scope: "full" });
+
+      const afterCleared = openDb({
+        readonly: true,
+        init: false,
+        path: dbPath,
+      });
+      expect(readFreshnessSnapshot(afterCleared)).toMatchObject({
+        full_rebuild_pending: false,
+        facts_current: true,
+      });
+      afterCleared.close();
+
+      const clearedStats = await runCli(["stats"], dbPath);
+      expect(
+        warningNames(
+          statsEnvelopeSchema.parse(JSON.parse(clearedStats.stdout.trim()))
+            .warnings,
+        ),
+      ).not.toContain("FACTS_FROM_OLDER_VERSION");
     },
     CLI_TEST_TIMEOUT,
   );

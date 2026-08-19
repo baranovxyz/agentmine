@@ -50,17 +50,9 @@ agentmine version
 The first command prints only the semantic version. The second emits a JSON envelope with the
 runtime, target, runtime version, and public source commit when available.
 
-When upgrading an existing 0.8.x corpus, inspect and apply the one-time storage split before any
-normal corpus command:
-
-```bash
-agentmine compact --dry-run
-agentmine compact
-```
-
-The migration is resumable and checks available disk space before writing. Agentmine 0.9 refuses
-normal corpus commands until it completes; `agentmine backup` remains available as the recovery
-step before migration.
+Upgrading an existing installation or corpus — including the one-time 0.8.x -> 0.9 storage-split
+migration, and what a version upgrade means for already-derived fact tables — is covered in
+[Upgrading](guides/upgrading.md).
 
 ## Quick start
 
@@ -158,6 +150,8 @@ AGENTMINE_DB=/path/to/sessions.db agentmine stats
 ## Next steps
 
 - [The pipeline](guides/pipeline.md) explains each stage and why the pipeline is safe to rerun.
+- [Upgrading](guides/upgrading.md) covers how to upgrade each install method and when a corpus needs
+  its fact tables rebuilt.
 - [CLI command overview](reference/cli.md) lists common browse, search, pipeline, and maintenance
   commands.
 - [Agent CLI contract](reference/agent-contract.md) describes the JSON envelope and error codes;
