@@ -60,3 +60,28 @@ Run `agentmine schema` to inspect the result-envelope schema, exit codes, and to
 registry. Use
 `agentmine schema --tables` to list database tables and views, or
 `agentmine schema --table messages` to inspect one table before writing ad-hoc SQL.
+
+`agentmine query` also accepts read-only introspection `PRAGMA` statements — `table_info`,
+`table_list`, `index_list`, and similar — so the schema can be discovered from inside a query
+session. Assignment forms (`PRAGMA x = y`) stay rejected and the database is still opened read-only.
+Only the first statement is compiled, so anything following a `;` is ignored rather than executed.
+
+Do not treat a command's output field names as column names. `sessions` and `workflows` emit derived
+fields such as `started_at_iso`, `ended_at_iso`, `first_user_prompt_preview`, and
+`reconstruct_command` that do not exist in the schema; the stored columns are `started_at` and
+`ended_at` (epoch seconds) and `first_user_prompt`.
+
+## Interpreted input
+
+When a strict reading fails, `fts` and `session` retry once with a single unambiguous
+interpretation, and the successful envelope names what was substituted:
+
+- `QUERY_SANITIZED` — the full-text query was rejected by FTS5 and rerun with its bare terms
+  quoted. Hyphenated prose (`no-show`, `agent-first`) parses as column-filter syntax otherwise.
+  Quoted spans, `AND`/`OR`/`NOT`/`NEAR`, parentheses, and trailing `*` are preserved.
+- `SESSION_ID_RESOLVED` — the session id was matched by external id, by a missing source prefix, or
+  by unique prefix rather than exactly.
+
+Neither warning changes the rows, status, or exit code. A query that already parses is never
+rewritten, and an id that matches more than one session is an error naming the candidates rather
+than a guess. Treat either warning as a signal to pin the exact form in anything you store.

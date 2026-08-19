@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, statSync } from "node:fs";
 import { dirname } from "node:path";
 import { getDbPath } from "../config.js";
 import { Errors } from "../contract/errors.js";
+import { VERSION } from "../version.js";
 import { SCHEMA_SQL } from "./schemaText.js";
 import { Database } from "./sqlite.js";
 
@@ -40,6 +41,23 @@ function storedSchemaVersionIsFuture(value: string | undefined): boolean {
   return value > current;
 }
 
+/**
+ * Identify the running binary for a future-schema refusal, so the operator
+ * knows WHICH install is stale without going digging: a bare "upgrade
+ * Agentmine" names neither the stale binary nor a way to replace it. Never
+ * throws — `process.argv[1]` is unset in some embedders, so this falls back
+ * to `process.execPath`, and a further failure still yields a usable
+ * (unpathed) description.
+ */
+function describeRunningBinary(): string {
+  try {
+    const path = process.argv[1] ?? process.execPath;
+    return `agentmine ${VERSION} at ${path}`;
+  } catch {
+    return `agentmine ${VERSION}`;
+  }
+}
+
 export function dbExists(path?: string): boolean {
   const p = path ?? getDbPath();
   try {
@@ -76,7 +94,10 @@ export function openDb(opts: OpenDbOptions = {}): DatabaseType {
         : "";
     db.close();
     throw Errors.dbError(
-      `Database schema version${displayedVersion} is newer than Agentmine supports (${CURRENT_SCHEMA_VERSION}). Upgrade Agentmine before opening this corpus.`,
+      `Database schema version${displayedVersion} is newer than this Agentmine build supports ` +
+        `(${CURRENT_SCHEMA_VERSION}). The running binary is ${describeRunningBinary()} — it is older ` +
+        "than the corpus. Upgrade it (npm i -g agentmine@latest) or run a newer agentmine against " +
+        "this corpus.",
     );
   }
 

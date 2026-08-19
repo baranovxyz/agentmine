@@ -1,8 +1,13 @@
 import { defineCommand } from "citty";
+import type { CliError } from "../contract/errors.js";
 import { Errors } from "../contract/errors.js";
-import { type CommandOutcome, runCommand } from "../contract/result.js";
+import {
+  type CliWarning,
+  type CommandOutcome,
+  runCommand,
+} from "../contract/result.js";
 import { archiveAlias, attachArchiveIfPresent } from "../db/archives.js";
-import { dbExists, openDb } from "../db/client.js";
+import { type DatabaseType, dbExists, openDb } from "../db/client.js";
 import {
   readCommandWarnings,
   readWithFreshnessSnapshot,
@@ -10,6 +15,84 @@ import {
 import { decodePayload } from "../db/payloadCodec.js";
 
 type Data = Record<string, unknown>;
+
+/** Below this length a prefix/suffix search is a near-certain miss over the
+ * whole table, so a pathological input (a truncated flag value, a stray
+ * shell argument) goes straight to not-found instead of scanning. */
+const MIN_RESOLUTION_LENGTH = 4;
+/** Cap on rows considered by the unique-prefix search (step 3). Bounds the
+ * scan and doubles as the "how many ids to report" figure for AMBIGUOUS. */
+const PREFIX_CANDIDATE_LIMIT = 6;
+/** How many full ids to name in an AMBIGUOUS message. */
+const MAX_DISPLAYED_CANDIDATES = 5;
+
+export type SessionIdResolution =
+  | { id: string }
+  | { candidates: string[] }
+  | null;
+
+/**
+ * Resolve a possibly-inexact session id the way a caller who almost got it
+ * right meant it: exact match, then a missing source prefix or a bare
+ * external id, then a unique prefix. Each step only accepts a single
+ * unambiguous match; anything else falls through to the next step (or, for
+ * the final step, becomes an AMBIGUOUS result naming the candidates).
+ */
+export function resolveSessionId(
+  db: DatabaseType,
+  id: string,
+): SessionIdResolution {
+  const exact = db
+    .prepare<[string], { id: string }>(`SELECT id FROM sessions WHERE id = ?`)
+    .get(id);
+  if (exact) return { id: exact.id };
+
+  if (id.length < MIN_RESOLUTION_LENGTH) return null;
+
+  if (!id.includes("--")) {
+    const bySuffix = db
+      .prepare<[string], { id: string }>(
+        `SELECT id FROM sessions WHERE id LIKE '%--' || ?`,
+      )
+      .all(id);
+    const byExternalId = db
+      .prepare<[string], { id: string }>(
+        `SELECT id FROM sessions WHERE external_id = ?`,
+      )
+      .all(id);
+    const merged = uniqueIds([...bySuffix, ...byExternalId]);
+    const [onlyMerged] = merged;
+    if (merged.length === 1 && onlyMerged !== undefined) {
+      return { id: onlyMerged };
+    }
+  }
+
+  const byPrefix = uniqueIds(
+    db
+      .prepare<[string], { id: string }>(
+        `SELECT id FROM sessions WHERE id LIKE ? || '%' LIMIT ${PREFIX_CANDIDATE_LIMIT}`,
+      )
+      .all(id),
+  );
+  const [onlyPrefixed] = byPrefix;
+  if (byPrefix.length === 1 && onlyPrefixed !== undefined) {
+    return { id: onlyPrefixed };
+  }
+  if (byPrefix.length > 1) return { candidates: byPrefix };
+
+  return null;
+}
+
+function uniqueIds(rows: Array<{ id: string }>): string[] {
+  return Array.from(new Set(rows.map((row) => row.id)));
+}
+
+function sessionNotFoundError(id: string): CliError {
+  return Errors.notFound(
+    `Session '${id}' not found. List candidates with \`agentmine sessions --limit 20\` ` +
+      "(ids look like cc--<uuid>, cx--<ulid>, oc--<id>).",
+  );
+}
 
 export const sessionCommand = defineCommand({
   meta: {
@@ -56,12 +139,25 @@ export const sessionCommand = defineCommand({
         const db = openDb({ readonly: true });
         try {
           const snapshot = readWithFreshnessSnapshot(db, () => {
+            const resolution = resolveSessionId(db, id);
+            if (resolution === null) throw sessionNotFoundError(id);
+            if ("candidates" in resolution) {
+              throw Errors.invalidInput(
+                `Session id '${id}' is ambiguous; ${resolution.candidates.length} sessions share ` +
+                  `that prefix: ${resolution.candidates.slice(0, MAX_DISPLAYED_CANDIDATES).join(", ")}. ` +
+                  "Pass a full id.",
+              );
+            }
+            const resolvedId = resolution.id;
+
             const session = db
               .prepare<[string], Record<string, unknown>>(
                 `SELECT * FROM sessions WHERE id = ?`,
               )
-              .get(id);
-            if (!session) throw Errors.notFound(`Session ${id} not found`);
+              .get(resolvedId);
+            // Defensive only: resolvedId was just read from a live row inside
+            // this same snapshot, so this should be unreachable.
+            if (!session) throw sessionNotFoundError(resolvedId);
 
             const messages = db
               .prepare<
@@ -76,7 +172,7 @@ export const sessionCommand = defineCommand({
               >(
                 `SELECT turn, role, author, ts, text FROM messages WHERE session_id = ? ORDER BY turn`,
               )
-              .all(id);
+              .all(resolvedId);
 
             const slicedMessages = sliceMessages(messages, args);
             const retainedTurns = new Set(
@@ -103,7 +199,7 @@ export const sessionCommand = defineCommand({
                         exit_code, duration_ms, call_id
                    FROM tool_calls WHERE session_id = ? ORDER BY turn, idx`,
               )
-              .all(id)
+              .all(resolvedId)
               .filter((toolCall) => retainedTurns.has(toolCall.turn));
 
             if (args["show-context"]) {
@@ -119,7 +215,7 @@ export const sessionCommand = defineCommand({
                       `SELECT turn, idx, payload FROM ${archiveAlias("tools")}.tool_outputs
                         WHERE session_id = ?`,
                     )
-                    .all(id)
+                    .all(resolvedId)
                     .map((row) => ({
                       turn: row.turn,
                       idx: row.idx,
@@ -139,15 +235,30 @@ export const sessionCommand = defineCommand({
                 if (outputText !== undefined) toolCall.output_text = outputText;
               }
             }
-            return { session, slicedMessages, toolCalls };
+            return { session, slicedMessages, toolCalls, resolvedId };
           });
-          const { session, slicedMessages, toolCalls } = snapshot.value;
+          const { session, slicedMessages, toolCalls, resolvedId } =
+            snapshot.value;
+          const resolutionWarnings: CliWarning[] =
+            resolvedId !== id
+              ? [
+                  {
+                    name: "SESSION_ID_RESOLVED",
+                    message: `Resolved '${id}' to session '${resolvedId}'.`,
+                  },
+                ]
+              : [];
 
           if (args.md) {
             const md = renderMarkdown(session, slicedMessages, toolCalls);
             // Markdown goes on stdout as a STRING payload inside the envelope,
             // so agents can still parse the envelope.
-            return { data: { markdown: md } };
+            return {
+              data: { markdown: md },
+              ...(resolutionWarnings.length > 0
+                ? { warnings: resolutionWarnings }
+                : {}),
+            };
           }
 
           return {
@@ -156,7 +267,10 @@ export const sessionCommand = defineCommand({
               messages: slicedMessages,
               tool_calls: toolCalls,
             },
-            warnings: readCommandWarnings(db, snapshot.freshness),
+            warnings: [
+              ...resolutionWarnings,
+              ...readCommandWarnings(db, snapshot.freshness),
+            ],
           };
         } finally {
           db.close();

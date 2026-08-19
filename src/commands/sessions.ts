@@ -19,8 +19,9 @@ type Outcome = CommandOutcome<Data>;
  *   --root-only, --parent, --agent-type                          lineage predicates
  *   --where                                                       raw SQL predicate escape hatch
  *
- * `--where` is appended to the WHERE clause. Keep it safe by running the DB in
- * readonly mode and by validating no `;` inside the user input.
+ * `--where` is appended to the WHERE clause. Safety comes from running the DB
+ * readonly, not from scanning the predicate text — see the comment at its
+ * call site below.
  */
 export const sessionsCommand = defineCommand({
   meta: {
@@ -56,8 +57,7 @@ export const sessionsCommand = defineCommand({
     "min-turns": { type: "string", description: "Minimum turn_count" },
     where: {
       type: "string",
-      description:
-        "Extra SQL predicate, ANDed with other filters (readonly, no ';')",
+      description: "Extra SQL predicate, ANDed with other filters (readonly)",
     },
     limit: { type: "string", default: "50" },
   },
@@ -120,11 +120,14 @@ export const sessionsCommand = defineCommand({
             params.push(n);
           }
           if (args.where) {
-            const extra = String(args.where);
-            if (extra.includes(";")) {
-              throw Errors.invalidInput("--where cannot contain ';'");
-            }
-            clauses.push(`(${extra})`);
+            // No `;`-scanning guard here: the connection is opened
+            // `readonly: true` above, so no write can occur, and
+            // `prepare()` below compiles only the first statement and never
+            // executes what follows, so a chained `; DROP TABLE ...` runs the
+            // SELECT and drops nothing. A guard on `;` would only reject
+            // legitimate predicates like `title LIKE '%;%'` — session titles
+            // are natural language and commonly contain one.
+            clauses.push(`(${String(args.where)})`);
           }
 
           const whereSql = clauses.length

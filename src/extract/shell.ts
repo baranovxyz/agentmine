@@ -1,12 +1,28 @@
+import type { Command } from "unbash";
 import type { DatabaseType } from "../db/client.js";
+import { redactText } from "../redact/index.js";
 import { type ExtractScope, scopeAnd, scopedDelete } from "./scope.js";
+import { commandArgv, reachableCommands } from "./shellParse.js";
 
 /**
  * shell_commands: one row per Bash/Shell invocation.
  *
- * cmd_head = first non-wrapper token. Wrappers like `env`, `time`, `sudo`,
- * `nohup`, `exec`, `command` are stripped so `git`, `npm`, `cargo`, `kubectl`
- * all group cleanly. Also strips leading `VAR=value` assignments.
+ * cmd_head = the first non-wrapper word of the command as a shell parser reads
+ * it. Wrappers like `env`, `time`, `sudo`, `nohup`, `exec`, `command` are
+ * stripped so `git`, `npm`, `cargo`, `kubectl` all group cleanly, as are
+ * `VAR=value` assignments.
+ *
+ * The head is derived from a parse, not from a whitespace split, because a
+ * split cannot tell a shell metacharacter from an ordinary character inside a
+ * quoted word: `IFS=';' read -r a b` and `PGPASSWORD="a;b" psql ...` both got
+ * cut at the quoted `;`, leaving only a fragment that looks like an assignment,
+ * and landed in the NULL bucket -- silently undercounting `top commands` and,
+ * because git.ts filters on `cmd_head = 'git'`, hiding those sessions' git
+ * operations too.
+ *
+ * A command that does not parse has no knowable command word, so its head is
+ * NULL rather than a guess. The row itself is still stored: the
+ * invocation happened, and `cmd_full` records it whole.
  */
 const SHELL_TOOL_NAMES = [
   "Bash",
@@ -69,12 +85,25 @@ export function extractShellCommands(
       const cmd = extractCommand(args);
       if (!cmd) continue;
       const head = parseHead(cmd);
+      // Stored whole, not truncated. `cmd_head` is the short form; this column
+      // is the analyzable one, and downstream extractors parse it as shell. A
+      // cap here cut ~17% of commands mid-quote or mid-heredoc, which is
+      // indistinguishable from genuinely malformed input to any real parser --
+      // so a parser-based extractor lost every operation in those commands
+      // rather than just the truncated tail.
+      //
+      // Redacted on the way in. The source column (`tool_calls.args_json`) is
+      // not redacted at normalize time -- only `args_preview` and
+      // `output_preview` are -- so a command carrying a token in an env
+      // assignment or header would otherwise be stored verbatim, and storing
+      // it whole means storing more of it.
+      const storedCmd = redactText(cmd).text;
       insert.run(
         row.session_id,
         row.turn,
         row.idx,
         head,
-        cmd.slice(0, 500),
+        storedCmd,
         row.exit_code,
         row.duration_ms,
       );
@@ -101,8 +130,29 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 }
 
 function parseHead(cmd: string): string | null {
-  const tokens = tokenize(cmd);
-  for (const tok of tokens) {
+  // The first command word the parser reaches, over the same bounded scope
+  // every other shell-derived fact uses. An unparseable command reaches
+  // nothing, so its head is NULL.
+  //
+  // Commands are tried in order rather than taking only the first, because a
+  // statement can carry no command word at all: a script that opens with a
+  // bare `WT=/path/to/tree` assignment before running `git -C "$WT" ...` has an
+  // assignment-only first command, and the head of that script is `git`.
+  for (const command of reachableCommands(cmd)) {
+    const head = headOfCommand(command);
+    if (head !== null) return head;
+  }
+  return null;
+}
+
+/**
+ * The command word of one command, with wrappers stripped, or `null` if it has
+ * none (an assignment-only command, or one that is nothing but wrappers).
+ */
+function headOfCommand(command: Command): string | null {
+  // Assignment prefixes are already excluded by the parser, so this walk only
+  // has to handle the ones that follow a wrapper (`env FOO=bar git status`).
+  for (const tok of commandArgv(command)) {
     // skip VAR=value
     if (/^[A-Z_][A-Z0-9_]*=.*/.test(tok)) continue;
     // skip wrappers
@@ -114,10 +164,4 @@ function parseHead(cmd: string): string | null {
     return last ?? tok;
   }
   return null;
-}
-
-function tokenize(cmd: string): string[] {
-  // Very light tokenizer: split on whitespace, stop at first shell operator.
-  const cut = cmd.split(/[|&;<>(]/)[0] ?? cmd;
-  return cut.split(/\s+/).filter(Boolean);
 }

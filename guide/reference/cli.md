@@ -44,12 +44,17 @@ agentmine similar "today's task" --root-only --since 1d
 See [Similarity search](../guides/similarity-search.md) for `similar`'s `auto`/`hybrid`/`embedding`
 modes, time and lineage filters, and injected-message behavior.
 
-**FTS5 hyphen gotcha:** FTS5 parses `agent-first` as `agent MINUS first`. Wrap hyphenated phrases in
-double quotes:
+**Hyphenated phrases:** FTS5 reads `agent-first` as a filter on a column named `first`, so the raw
+query is rejected. `fts` notices, retries once with bare terms quoted, and returns the rows with a
+`QUERY_SANITIZED` warning naming what it ran. Quote them yourself to skip the retry and control
+matching exactly:
 
 ```bash
 agentmine fts '"agent-first"'
 ```
+
+A query that already parses as FTS5 — column filters, `AND`/`OR`/`NOT`/`NEAR`, `*` prefixes — is
+never rewritten.
 
 ## Ad-hoc SQL
 
@@ -57,7 +62,15 @@ agentmine fts '"agent-first"'
 agentmine query "SELECT source, count(*) AS n FROM sessions GROUP BY source"
 ```
 
-Ad-hoc SQL is read-only. Only `SELECT`, `WITH`, and `EXPLAIN` queries are accepted.
+Ad-hoc SQL is read-only. `SELECT`, `WITH`, `EXPLAIN`, and read-only introspection `PRAGMA`s
+(`table_info`, `table_list`, `index_list`, …) are accepted; assignment pragmas such as
+`PRAGMA user_version = 5` are not. Only the first statement is ever compiled, so anything after a
+`;` is ignored rather than run.
+
+A statement that names a column or table the corpus does not have reports the nearest real names
+alongside the database's own message, so check the suggestion before re-reading the schema. Column
+names seen in command output are not always columns — `started_at_iso` and
+`first_user_prompt_preview` are derived; the stored columns are `started_at` and `first_user_prompt`.
 
 ## Pipeline
 

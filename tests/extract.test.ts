@@ -1164,6 +1164,66 @@ describe("fact extractors", () => {
     rmSync(dbPath, { force: true });
   });
 
+  it("git_operations: a >500-char heredoc-carrying command keeps cmd_full whole and yields both the commit and the push it used to lose to truncation", () => {
+    const db = openDb({ path: dbPath });
+    // A realistic long commit: the message body is built via `$(cat <<'EOF' … EOF)`
+    // and padded well past the old 500-char cmd_full truncation cutoff. The
+    // heredoc body also name-drops "git log" as plain text, which must never
+    // itself surface as a git_operations row.
+    const filler = "x".repeat(600);
+    const heredocBody = [
+      "Long commit message body for a regression test.",
+      `Filler line: ${filler}`,
+      "This line mentions git log only as text inside the heredoc body.",
+    ].join("\n");
+    const cmd = `git commit -m "$(cat <<'EOF'\n${heredocBody}\nEOF\n)" && git push`;
+    expect(cmd.length).toBeGreaterThan(500);
+
+    upsertSessionWithPayload(
+      db,
+      makeSession({
+        messages: [
+          { turn: 1, role: "user", text: "", toolCalls: [] },
+          {
+            turn: 2,
+            role: "assistant",
+            text: "",
+            toolCalls: [
+              {
+                name: "Bash",
+                args: { command: cmd },
+                argsHash: "a",
+                argsPreview: "",
+                exitCode: 0,
+              },
+            ],
+          },
+        ],
+      }),
+    );
+    runAllExtractors(db);
+
+    // 1. shell_commands.cmd_full is stored whole, not truncated at 500 chars.
+    const shellRow = db
+      .prepare(`SELECT cmd_full FROM shell_commands`)
+      .get() as { cmd_full: string };
+    expect(shellRow.cmd_full.length).toBe(cmd.length);
+    expect(shellRow.cmd_full.endsWith(cmd.slice(-40))).toBe(true);
+    expect(shellRow.cmd_full).toBe(cmd);
+
+    // 2. Both the commit and the push it used to lose to truncation now show up.
+    const gitRows = db
+      .prepare(`SELECT op FROM git_operations ORDER BY idx`)
+      .all() as Array<{ op: string }>;
+    expect(gitRows.map((r) => r.op)).toEqual(["commit", "push"]);
+
+    // 3. The phantom "git log" inside the heredoc body still yields no row.
+    expect(gitRows.some((r) => r.op === "log")).toBe(false);
+
+    db.close();
+    rmSync(dbPath, { force: true });
+  });
+
   it("todo_events: counts statuses from TodoWrite args.todos", () => {
     const db = openDb({ path: dbPath });
     upsertSessionWithPayload(

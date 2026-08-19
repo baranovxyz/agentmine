@@ -4,11 +4,19 @@ import { type ExtractScope, scopeWhere } from "./scope.js";
 /**
  * Post-extract pass: populate ended_with_commit and ended_with_commit_attempted.
  *
- * Looks at the latest shell command containing 'git commit' in each session:
+ * Looks at each session's latest real `git commit` invocation:
  *   CC / opencode: exit_code = 0  → ended_with_commit = 1
  *   Cursor:        no exit codes  → ended_with_commit_attempted = 1 (ended_with_commit stays 0)
  *
- * Must run after extractShellCommands.
+ * The invocation comes from `git_operations`, which is parse-derived, not from
+ * matching `cmd_full LIKE '%git commit%'`. The text match
+ * counted any command that merely CONTAINED that phrase, so a later
+ * `grep -rn "git commit" docs/` -- or a commit message quoting the phrase --
+ * became "the latest commit" and overwrote a real successful commit with an
+ * unrelated command's exit code, flipping the session's flag to 0.
+ *
+ * Must run after extractGitOperations (which must itself run after
+ * extractShellCommands).
  */
 export function extractCommitStatus(
   db: DatabaseType,
@@ -34,8 +42,8 @@ export function extractCommitStatus(
     .all();
 
   const latestCommit = db.prepare<[string], CommitRow>(
-    `SELECT exit_code FROM shell_commands
-      WHERE session_id = ? AND cmd_full LIKE '%git commit%'
+    `SELECT exit_code FROM git_operations
+      WHERE session_id = ? AND op = 'commit'
       ORDER BY turn DESC, idx DESC LIMIT 1`,
   );
 
