@@ -133,26 +133,40 @@ function detectRepeatedFileRead(
       `SELECT session_id, turn, path FROM files_touched WHERE op = 'read'${scopeAnd(scope)}`,
     )
     .all();
-  const counts = new Map<string, { turn: number; n: number }>();
+  // The grouping key is composite, so the session id and path are carried in
+  // the value rather than recovered by splitting the key back apart: a path
+  // containing the separator (`src/a::b.rs`) split into the wrong pieces and
+  // reported a truncated path for a file that was really read that many times.
+  interface ReadCount {
+    sessionId: string;
+    path: string;
+    turn: number;
+    n: number;
+  }
+  const counts = new Map<string, ReadCount>();
   for (const r of rows) {
     const key = `${r.session_id}::${r.path}`;
     const cur = counts.get(key);
     if (cur) {
       cur.n += 1;
     } else {
-      counts.set(key, { turn: r.turn, n: 1 });
+      counts.set(key, {
+        sessionId: r.session_id,
+        path: r.path,
+        turn: r.turn,
+        n: 1,
+      });
     }
   }
   let n = 0;
-  for (const [key, info] of counts) {
+  for (const info of counts.values()) {
     if (info.n < 4) continue;
-    const [sessionId, path] = key.split("::");
     insertStmt.run(
-      sessionId!,
+      info.sessionId,
       info.turn,
       next(),
       "repeated_file_read",
-      `${path} (${info.n} reads)`,
+      `${info.path} (${info.n} reads)`,
     );
     n += 1;
   }

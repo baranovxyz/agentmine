@@ -69,9 +69,20 @@ node dist/cli.js workflow <run_id>    # one run: rollups, ordered phases, per-ag
   package name, command examples, env/config prefixes, and code literals.
   First mention should be **Agentmine** (`agentmine`).
 - **DB writes are explicit CLI operations.** `agentmine query` opens with
-  SQLite `readonly` flag; only `SELECT`, `WITH`, `EXPLAIN` accepted.
+  SQLite `readonly` flag; only `SELECT`, `WITH`, `EXPLAIN`, and allowlisted
+  read-only introspection `PRAGMA`s accepted. The pragma pattern is anchored
+  and rejects the assignment form; the SELECT path deliberately has no
+  statement-chaining scanner, because `prepare()` compiles only the first
+  statement and a `;` inside a literal is data, not a terminator.
   Commands that mutate local state must be idempotent and emit JSON receipts.
   `embed --dry-run` must not write chunks, vectors, or run receipts.
+- **A rejection names its recovery.** On the agent-facing read surface
+  (`query`, `fts`, `session`, and the shared `openDb` refusal) the strict
+  reading runs first and unchanged; only after it fails may the command retry
+  one *unambiguous* interpretation, and a result that came from one carries a
+  warning naming the substitution (`QUERY_SANITIZED`, `SESSION_ID_RESOLVED`).
+  Every actionable rejection names the command that resolves it. Contract:
+  `guide/reference/agent-contract.md`.
 - **Corpus operations serialize across processes.** Corpus mutations (`normalize`,
   `extract`, `embed`, `prices sync`, `compact`, and `purge --yes`) and the
   consistency-sensitive `backup` command use `withWriteLock` (`src/db/lock.ts`),
@@ -87,6 +98,24 @@ node dist/cli.js workflow <run_id>    # one run: rollups, ordered phases, per-ag
   events and full untruncated tool output when the source provides it. Keep
   previews in `tool_calls` bounded for browsing, but do not throw away
   analyzable raw data during normalize.
+- **Shell-derived facts come from a parse, never a match.** `shell_commands.cmd_full`
+  is stored WHOLE (no cap) and redacted on the way in — `tool_calls.args_json` is
+  not redacted at normalize time, only the previews are. Extractors over it go
+  through `extract/shellParse.ts` (the `unbash` shell parser): a row may only be
+  attributed to a parsed command node whose command word is the tool, so text in a
+  quoted argument or heredoc body never becomes a fact. Any parse error means NO rows
+  for that command — a fact table would rather be missing a row than carry a wrong
+  one. That policy only holds because the text is complete: a 500-char cap here used
+  to make ~17% of commands unparseable and silently erase their facts. Scope is
+  top-level plus `&&`/`||`/`;`/`|`; subshells, loop/conditional bodies, and `$( )` are
+  deliberately not walked (widening also reaches heredoc bodies — validate before
+  changing), so a script that is only a `for` loop has NO `cmd_head`: a shell keyword
+  is not a command. `cmd_head` is that same parse's first command word, skipping
+  statements that carry none (`WT=/path` on its own line), and it gates `git.ts` —
+  losing a head loses that command's git ops too. A session-level fact belongs to the
+  fact table, not the text: `ended_with_commit` reads `git_operations`, because
+  `cmd_full LIKE '%git commit%'` let a later `grep -rn "git commit"` overwrite a real
+  commit. Changing derivation does not fix stored rows; that needs `extract --force`.
 - **Cold payload lives in sibling archives, not `sessions.db`.** `raw_events` and
   `tool_outputs` are in `sessions-raw.db` / `sessions-tools.db`, stored
   zstd-compressed as BLOBs, attached on demand via `db/archives.ts` and read

@@ -3,6 +3,42 @@
 Notable Agentmine changes only. Keep this file short; detailed implementation notes belong in
 commit history and release notes.
 
+## 0.11.0 - 2026-08-19
+
+**Existing corpora need `agentmine extract --force` after upgrading.** This release changes what
+several fact tables contain, and rows produced by earlier versions are not corrected automatically.
+Run `agentmine backup` first.
+
+- Derive shell facts by parsing the command as shell rather than by matching text within it. Text
+  that merely resembles an invocation — a tool named inside a quoted argument, a heredoc body, or
+  another command's operand — no longer produces a fact row. A command that cannot be parsed
+  produces no rows at all, because a fact table is better missing a row than carrying one that
+  describes a command that never ran.
+- Store each shell command whole. Commands were previously capped, which cut roughly one in six
+  mid-quote or mid-heredoc; to a parser that is indistinguishable from malformed input, so those
+  commands lost every fact, not just the part past the cut.
+- Report the command a shell invocation actually ran. The short name was taken from a whitespace
+  split that stopped at the first shell metacharacter, which a split cannot tell from an ordinary
+  character inside quotes: `IFS=';' read …` and `PGPASSWORD="a;b" psql …` were recorded as having
+  no command at all, and a script that binds a variable before using it was attributed to the
+  variable. Shell keywords such as `for` are no longer reported as though they were programs.
+- Report a session as having committed based on whether a commit actually ran. It was previously
+  based on the last command whose text contained the phrase, so a later `grep` for that phrase, or
+  a commit message quoting it, replaced a successful commit with an unrelated command's outcome.
+- Report the full path of a repeatedly read file, including paths containing `::`.
+- Interpret an unambiguous near miss on the read surface instead of only rejecting it. The strict
+  reading is still attempted first and is unchanged; only once it fails does a command retry a
+  single unambiguous interpretation, and any result reached that way carries a warning naming the
+  substitution. `query` suggests the near-miss table or column it thinks was meant, `fts` retries a
+  query the full-text engine rejected with its terms quoted, and `session` resolves a session id
+  given in a form close enough to identify exactly one session.
+- Name the command that resolves the problem in every actionable rejection, including the case
+  where the corpus is newer than the binary being run.
+- Let `sessions --where` accept a semicolon inside a predicate. A semicolon in a string literal is
+  data, not a statement separator, and rejecting it turned an ordinary title filter into an error.
+- Report the schema on request, so a query can be written against the corpus without guessing at
+  table and column names first.
+
 ## 0.10.0 - 2026-08-18
 
 - Add `agentmine daemon`, which keeps the corpus current on its own by scanning

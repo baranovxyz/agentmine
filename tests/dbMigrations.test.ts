@@ -6,11 +6,13 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   CODEX_LINEAGE_BACKFILL_META_KEY,
   CODEX_TOKEN_USAGE_BACKFILL_META_KEY,
+  CURRENT_SCHEMA_VERSION,
   getMeta,
   openDb,
   upsertMeta,
 } from "../src/db/client.js";
 import { sessionIsUpToDate } from "../src/db/writer.js";
+import { VERSION } from "../src/version.js";
 
 const dirs: string[] = [];
 
@@ -182,9 +184,24 @@ describe("Agentmine data migrations", () => {
     expect(() => openDb({ readonly: true, init: false, path: dbPath })).toThrow(
       /schema version 17 is newer/u,
     );
-    expect(() => openDb({ path: dbPath })).toThrow(
-      /schema version 17 is newer/u,
+
+    // The refusal must be self-diagnosing: name the running binary's version
+    // and resolved path, and give a concrete upgrade command, so an operator
+    // does not have to go digging for which install is stale.
+    let caught: unknown;
+    try {
+      openDb({ path: dbPath });
+    } catch (error) {
+      caught = error;
+    }
+    const message = caught instanceof Error ? caught.message : String(caught);
+    expect(message).toContain("schema version 17 is newer");
+    expect(message).toContain(
+      `this Agentmine build supports (${CURRENT_SCHEMA_VERSION})`,
     );
+    expect(message).toContain(`agentmine ${VERSION}`);
+    expect(message).toContain(process.argv[1] ?? process.execPath);
+    expect(message).toContain("npm i -g agentmine@latest");
 
     const check = new DatabaseSync(dbPath, { readOnly: true });
     expect(
