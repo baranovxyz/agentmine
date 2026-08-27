@@ -14,6 +14,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execa } from "execa";
 import { describe, expect, it } from "vitest";
+import { z } from "zod";
 import { Database } from "../src/db/sqlite.js";
 import { VERSION } from "../src/version.js";
 
@@ -24,6 +25,11 @@ const BUN_BIN = join(REPO, "node_modules", ".bin", "bun");
 const BUILD_SCRIPT = join(REPO, "scripts", "build-standalone.mjs");
 const CLINE_FIXTURE_DIR = join(__dirname, "fixtures", "cline", "fixture-001");
 const SOURCE_COMMIT = "0123456789abcdef0123456789abcdef01234567";
+const similarSuccessSchema = z.object({
+  status: z.literal("success"),
+  command: z.literal("agentmine similar"),
+  data: z.object({ rows: z.array(z.unknown()) }).passthrough(),
+});
 
 function hostTarget(): string | undefined {
   if (process.platform === "darwin" && process.arch === "arm64") {
@@ -63,6 +69,7 @@ describe.runIf(runStandalone)("standalone executable", () => {
     const clineSessionsDir = join(dir, "cline-sessions");
     const sourceDir = join(clineSessionsDir, "fixture-001");
     const dbPath = join(dir, "sessions.db");
+    const emptyDbPath = join(dir, "empty-sessions.db");
     const backupPath = join(dir, "backup.tar.gz");
     let fixtureServer: Server | undefined;
 
@@ -142,6 +149,27 @@ describe.runIf(runStandalone)("standalone executable", () => {
       expect(schemaResult.status).toBe("success");
       expect(schemaResult.data.commands.version).toBeTruthy();
 
+      const emptyNormalize = await runBinary(
+        ["normalize", "--source", "codex", "--allow-empty"],
+        { AGENTMINE_DB: emptyDbPath },
+      );
+      expect(
+        emptyNormalize.exitCode,
+        `${emptyNormalize.stdout}\n${emptyNormalize.stderr}`,
+      ).toBe(0);
+      const emptySimilar = await runBinary(
+        ["similar", "totallyabsenttoken", "--mode", "fts", "--all-projects"],
+        { AGENTMINE_DB: emptyDbPath },
+      );
+      expect(
+        emptySimilar.exitCode,
+        `${emptySimilar.stdout}\n${emptySimilar.stderr}`,
+      ).toBe(0);
+      expect(
+        similarSuccessSchema.parse(JSON.parse(emptySimilar.stdout.trim())).data
+          .rows,
+      ).toEqual([]);
+
       mkdirSync(sourceDir, { recursive: true });
       for (const name of [
         "fixture-001.messages.json",
@@ -191,6 +219,38 @@ describe.runIf(runStandalone)("standalone executable", () => {
       } finally {
         db.close();
       }
+
+      const absentSimilar = await runBinary([
+        "similar",
+        "totallyabsenttoken",
+        "--mode",
+        "fts",
+        "--all-projects",
+      ]);
+      expect(
+        absentSimilar.exitCode,
+        `${absentSimilar.stdout}\n${absentSimilar.stderr}`,
+      ).toBe(0);
+      expect(
+        similarSuccessSchema.parse(JSON.parse(absentSimilar.stdout.trim())).data
+          .rows,
+      ).toEqual([]);
+
+      const mixedSimilar = await runBinary([
+        "similar",
+        "redacted totallyabsenttoken",
+        "--mode",
+        "fts",
+        "--all-projects",
+      ]);
+      expect(
+        mixedSimilar.exitCode,
+        `${mixedSimilar.stdout}\n${mixedSimilar.stderr}`,
+      ).toBe(0);
+      expect(
+        similarSuccessSchema.parse(JSON.parse(mixedSimilar.stdout.trim())).data
+          .rows.length,
+      ).toBeGreaterThan(0);
 
       const prices = await runBinary(["prices", "sync"]);
       expect(prices.exitCode, `${prices.stdout}\n${prices.stderr}`).toBe(0);
@@ -279,7 +339,7 @@ describe.runIf(runStandalone)("standalone executable", () => {
       expect(existsSync(backupPath)).toBe(true);
       expect(readFileSync(backupPath).byteLength).toBeGreaterThan(0);
     } finally {
-      if (fixtureServer) {
+      if (fixtureServer?.listening) {
         await new Promise<void>((resolvePromise, reject) => {
           fixtureServer?.close((error) => {
             if (error) reject(error);

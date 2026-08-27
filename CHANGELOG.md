@@ -3,6 +3,16 @@
 Notable Agentmine changes only. Keep this file short; detailed implementation notes belong in
 commit history and release notes.
 
+## 0.11.3 - 2026-08-27
+
+Upgrading needs no corpus migration.
+
+- Normalize Bun's missing-row SQLite result to the same contract as Node. Lexical similarity now
+  returns an empty or partial match set when a query contains a term absent from the corpus instead
+  of failing with an internal property-access error.
+- Cover empty, absent-only, and mixed present/absent queries through the compiled Bun standalone
+  executable.
+
 ## 0.11.2 - 2026-08-27
 
 Upgrading needs no manual corpus migration. The next ordinary writer applies schema version 18 and
