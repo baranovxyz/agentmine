@@ -10,8 +10,13 @@ import type { StandDownReason } from "../db/supervision.js";
 import type { DaemonConfig, DaemonSource } from "./config.js";
 import type { ScanStats, SourceIndex } from "./scan.js";
 
+/** Avoid a failed stage becoming a 500 ms child-process restart loop. */
+const STAGE_RETRY_MS = 5_000;
+
 export interface StepOutcome {
   ok: boolean;
+  /** The daemon is shutting down; preserve pending work without reporting a fault. */
+  cancelled?: boolean;
   /** Counters as the underlying import reported them. */
   filesScanned?: number;
   processed?: number;
@@ -22,7 +27,10 @@ export interface StepOutcome {
 
 export interface DaemonPorts {
   /** Import one source: mirror it if needed, then normalize it. */
-  runImport(source: DaemonSource, sinceWindow: string): Promise<StepOutcome>;
+  runImport(
+    source: DaemonSource,
+    sinceWindow: string | undefined,
+  ): Promise<StepOutcome>;
   /** Derive fact tables across every source. */
   runExtract(): Promise<StepOutcome>;
   /** Record that the daemon is alive and making progress. */
@@ -80,6 +88,9 @@ export class IngestDaemon {
   private extractPendingSince: number | undefined;
   private lastImportAt: number | undefined;
   private lastHeartbeatAt = 0;
+  private readonly importRetryAt = new Map<string, number>();
+  private extractRetryAt: number | undefined;
+  private stopping = false;
 
   constructor(
     private readonly sources: DaemonSource[],
@@ -89,12 +100,12 @@ export class IngestDaemon {
   ) {}
 
   /**
-   * Seed the index without importing.
+   * Reconcile every non-empty source on startup.
    *
-   * Everything already on disk is recorded as known, so the first cycle does
-   * not mistake an existing corpus for a corpus that just changed. The walk is
-   * the one-time startup cost the spec states separately from the steady-state
-   * budget.
+   * The normalizer's persistent file-stat cache makes unchanged files cheap,
+   * while scheduling the source closes the crash gap: bytes whose previous
+   * import was interrupted must not become invisible merely because their
+   * modification time is unchanged after restart.
    */
   async start(now: number): Promise<void> {
     // Wall time, not the injected logical clock: `now` drives scheduling
@@ -112,6 +123,11 @@ export class IngestDaemon {
     });
   }
 
+  /** Prevent new stages from starting while an active child is being drained. */
+  stop(): void {
+    this.stopping = true;
+  }
+
   /**
    * One cycle: scan whatever is due, then import whatever is ready.
    *
@@ -120,12 +136,15 @@ export class IngestDaemon {
    * work the running import is about to cover.
    */
   async tick(now: number): Promise<void> {
-    if (this.busy) return;
+    if (this.busy || this.stopping) return;
     this.busy = true;
     try {
       await this.runDueScans(now);
+      if (this.stopping) return;
       await this.runDueImports(now);
+      if (this.stopping) return;
       await this.runDueExtract(now);
+      if (this.stopping) return;
       // Throttled: the heartbeat is a corpus write, and one per cycle would
       // put a steady write stream through a database meant to be read.
       if (now - this.lastHeartbeatAt >= this.config.heartbeatIntervalMs) {
@@ -177,11 +196,14 @@ export class IngestDaemon {
 
   private async runDueImports(now: number): Promise<void> {
     for (const pending of this.index.pendingSources()) {
+      if (this.stopping) return;
       const source = this.sources.find((s) => s.name === pending.source);
       if (source === undefined) {
         this.index.clearPending(pending.source);
         continue;
       }
+      const retryAt = this.importRetryAt.get(source.name);
+      if (retryAt !== undefined && now < retryAt) continue;
       // Settled means no NEW change for the quiet period; the ceiling counts
       // from the first unserviced change. Measuring both from the same instant
       // would make a source that never stops being written look settled as soon
@@ -199,15 +221,18 @@ export class IngestDaemon {
         reason: ceiling && !settled ? "ceiling" : "settled",
         pendingMs: waited,
       });
-      this.index.clearPending(source.name);
-
       const started = Date.now();
       const outcome = await this.ports.runImport(
         source,
-        this.config.sinceWindow,
+        pending.fullReconciliation ? undefined : this.config.sinceWindow,
       );
       const finished = Date.now();
+      if (this.stopping || outcome.cancelled) return;
       if (!outcome.ok) {
+        this.importRetryAt.set(
+          source.name,
+          now + (finished - started) + STAGE_RETRY_MS,
+        );
         this.ports.onEvent({
           kind: "error",
           source: source.name,
@@ -215,6 +240,8 @@ export class IngestDaemon {
         });
         continue;
       }
+      this.importRetryAt.delete(source.name);
+      this.index.clearPending(source.name);
       this.ports.onEvent({
         kind: "imported",
         source: source.name,
@@ -232,9 +259,10 @@ export class IngestDaemon {
   }
 
   private async runDueExtract(now: number): Promise<void> {
-    if (this.config.noExtract) return;
+    if (this.config.noExtract || this.stopping) return;
     const pendingSince = this.extractPendingSince;
     if (pendingSince === undefined) return;
+    if (this.extractRetryAt !== undefined && now < this.extractRetryAt) return;
 
     const quiet =
       this.lastImportAt !== undefined &&
@@ -242,10 +270,12 @@ export class IngestDaemon {
     const ceiling = now - pendingSince >= this.config.extractCeilingMs;
     if (!quiet && !ceiling) return;
 
-    this.extractPendingSince = undefined;
     const started = Date.now();
     const outcome = await this.ports.runExtract();
+    const finished = Date.now();
+    if (this.stopping || outcome.cancelled) return;
     if (!outcome.ok) {
+      this.extractRetryAt = now + (finished - started) + STAGE_RETRY_MS;
       this.ports.onEvent({
         kind: "error",
         source: undefined,
@@ -253,9 +283,11 @@ export class IngestDaemon {
       });
       return;
     }
+    this.extractRetryAt = undefined;
+    this.extractPendingSince = undefined;
     this.ports.onEvent({
       kind: "extracted",
-      durationMs: Date.now() - started,
+      durationMs: finished - started,
       reason: ceiling && !quiet ? "ceiling" : "settled",
     });
   }

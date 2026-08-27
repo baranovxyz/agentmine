@@ -11,7 +11,7 @@
     },
     {
       "path": "cli.js",
-      "sha256": "13712ca6054cd4a9cd6d729d4ffbb21c6be37f786e3e5fc66c3f607fe9f47bd2",
+      "sha256": "0866f377f3638ff34d115ad9d3a77aac2493444c29ecad07a916ca2b5dc65e61",
       "size": 418,
       "executable": true
     },
@@ -22,9 +22,9 @@
       "executable": false
     },
     {
-      "path": "main-TIRP7E3U.js",
-      "sha256": "a216c337f12ef468a8389bf4c3bb6a7faca2f6deb541a989ed0414299b012d1c",
-      "size": 415897,
+      "path": "main-ERWETJZT.js",
+      "sha256": "ef992b5afa66d13a492802d4702498b7f046d24a87920da95c96956914874dce",
+      "size": 429365,
       "executable": false
     }
   ]

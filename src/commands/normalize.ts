@@ -247,6 +247,12 @@ export const normalizeCommand = defineCommand({
       description:
         "Only parse files modified within this window (e.g. '1d', '2w', '2026-05-08'). Skips older archives; SQLite-backed sources (opencode-db, kilo, and goose) are unaffected.",
     },
+    "allow-empty": {
+      type: "boolean",
+      default: false,
+      description:
+        "Treat zero eligible inputs as a successful no-op (used by daemon reconciliation)",
+    },
   },
   async run({ args }) {
     await runCommand({
@@ -306,7 +312,12 @@ export const normalizeCommand = defineCommand({
           // With a --since window, finding no recent transcripts is a normal
           // no-op, but the locked path must still scan supra-session workflow
           // artifacts and record successful completion.
-          if (sinceSec === null && !codexReparseRequired && !scanWorkflows) {
+          if (
+            sinceSec === null &&
+            !codexReparseRequired &&
+            !scanWorkflows &&
+            !args["allow-empty"]
+          ) {
             throw Errors.notFound(
               `No input files found under any enabled source root (${sources
                 .map((s) => s.rootPath)
@@ -370,10 +381,10 @@ export const normalizeCommand = defineCommand({
             args.force || dryRun ? new Map() : loadFileStatCache(db);
           const BATCH = 50;
           for (const { source, files } of fileSets) {
-            // The Codex lineage backfill must reparse unchanged Codex files, so
-            // the stat pre-filter is disabled for that source while it runs.
-            const statSkipEnabled =
-              !args.force && !(codexReparseRequired && source.name === "codex");
+            // A Codex backfill invalidates only unresolved files' stat-cache
+            // entries. Already repaired files stay skippable, so an incomplete
+            // migration resumes instead of reparsing the whole archive.
+            const statSkipEnabled = !args.force;
             for (let start = 0; start < files.length; start += BATCH) {
               const batch = files.slice(start, start + BATCH);
 
@@ -559,7 +570,8 @@ export const normalizeCommand = defineCommand({
             totalFiles === 0 &&
             sinceSec === null &&
             !codexReparseRequired &&
-            workflowRuns + workflowSkipped === 0
+            workflowRuns + workflowSkipped === 0 &&
+            !args["allow-empty"]
           ) {
             db.close();
             throw Errors.notFound(

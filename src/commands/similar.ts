@@ -9,6 +9,10 @@ import {
   readCommandWarnings,
   readWithFreshnessSnapshot,
 } from "../db/freshness.js";
+import {
+  readSupervisionSnapshot,
+  supervisionWarnings,
+} from "../db/supervision.js";
 import { deserializeVector } from "../embeddings/chunks.js";
 import {
   createEmbeddingProvider,
@@ -52,6 +56,18 @@ interface MatchRow {
   score: number;
   snippet: string;
 }
+
+type RankedMatchRow = Omit<MatchRow, "snippet"> & { fts_rowid: number };
+
+interface MatchInjectionRow {
+  injected: number;
+}
+
+interface MatchSnippetRow {
+  snippet: string;
+}
+
+export const MAX_FTS_SNIPPET_CHARS = 512;
 
 interface EmbeddingCandidateRow {
   chunk_id: number;
@@ -187,8 +203,8 @@ export const similarCommand = defineCommand({
 
         const query = String(args.q ?? "").trim();
         if (!query) throw Errors.invalidInput("Empty task description");
-        const matchQuery = toFtsQuery(query);
-        if (!matchQuery) {
+        const requestedMatchQuery = toFtsQuery(query);
+        if (!requestedMatchQuery) {
           throw Errors.invalidInput(
             "Task description must contain at least one searchable word",
           );
@@ -236,6 +252,10 @@ export const similarCommand = defineCommand({
               filters,
             });
             const mode = modeSelection.selected;
+            const matchQuery =
+              mode === "embedding"
+                ? requestedMatchQuery
+                : planFtsQuery(db, query);
             const ftsRows =
               mode === "embedding"
                 ? []
@@ -267,6 +287,7 @@ export const similarCommand = defineCommand({
               excludedSessions,
               modeSelection,
               mode,
+              matchQuery,
               ftsRows,
               embeddingCandidates,
             };
@@ -275,6 +296,7 @@ export const similarCommand = defineCommand({
             inferredProject,
             project,
             excludedSessions,
+            matchQuery,
             ftsRows,
             embeddingCandidates,
           } = snapshot.value;
@@ -282,7 +304,7 @@ export const similarCommand = defineCommand({
           const freshnessWarnings =
             exclusionSeeds.length > 0
               ? readCommandWarnings(db, snapshot.freshness)
-              : [];
+              : supervisionWarnings(readSupervisionSnapshot(db));
 
           let embeddingRows: SimilarRow[] = [];
           if (mode !== "fts") {
@@ -406,24 +428,23 @@ function findFtsRows(
     params.push(opts.role);
   }
   addSessionFilterClauses(clauses, params, "s", opts.filters);
-  if (!opts.filters.includeInjected) {
-    addInjectedTextExclusion(clauses, params, "m.text");
-  }
   addExcludedSessionClause(
     clauses,
     params,
     "f.session_id",
     opts.excludeSessions,
   );
-  params.push(opts.limit);
+  const rankedLimit = opts.filters.includeInjected
+    ? opts.limit
+    : Math.min(opts.limit * 4, 5_000);
+  params.push(rankedLimit);
 
   const rows = db
     .prepare(
-      `SELECT f.session_id, f.turn, m.role,
+      `SELECT f.rowid AS fts_rowid, f.session_id, f.turn, m.role,
               s.source, s.project_path, s.git_branch, s.title,
               s.started_at, s.turn_count, s.tool_call_count,
-              bm25(messages_fts) AS score,
-              snippet(messages_fts, 2, '[', ']', '...', 18) AS snippet
+              bm25(messages_fts) AS score
          FROM messages_fts f
          JOIN messages m ON m.session_id = f.session_id AND m.turn = f.turn
          JOIN sessions s ON s.id = f.session_id
@@ -431,12 +452,45 @@ function findFtsRows(
         ORDER BY score
         LIMIT ?`,
     )
-    .all(...params) as MatchRow[];
-  return rows.map((row) => ({
-    ...row,
-    title: visibleTitle(row.title, opts.filters.includeInjected),
-  }));
+    .all(...params) as RankedMatchRow[];
+  const readMatchInjection = opts.filters.includeInjected
+    ? undefined
+    : db.prepare(FTS_MATCH_INJECTION_SQL);
+  const readMatchSnippet = db.prepare(FTS_MATCH_SNIPPET_SQL);
+  const prefixParams = INJECTED_TEXT_PREFIXES.map((prefix) => `${prefix}%`);
+  const visibleRows: MatchRow[] = [];
+  for (const row of rows) {
+    const injection = readMatchInjection?.get(...prefixParams, row.fts_rowid) as
+      | MatchInjectionRow
+      | undefined;
+    if (injection?.injected === 1) continue;
+    const snippet = readMatchSnippet.get(
+      MAX_FTS_SNIPPET_CHARS,
+      row.fts_rowid,
+      opts.query,
+    ) as MatchSnippetRow | undefined;
+    if (snippet === undefined) continue;
+    visibleRows.push({
+      ...row,
+      snippet: snippet.snippet,
+      title: visibleTitle(row.title, opts.filters.includeInjected),
+    });
+    if (visibleRows.length >= opts.limit) break;
+  }
+  return visibleRows;
 }
+
+const FTS_MATCH_INJECTION_SQL = `SELECT CASE WHEN (${prefixMatchSql("m.text", INJECTED_TEXT_PREFIXES)})
+               THEN 1 ELSE 0 END AS injected
+     FROM messages_fts f
+     JOIN messages m ON m.session_id = f.session_id AND m.turn = f.turn
+    WHERE f.rowid = ?`;
+
+/** Snippet lookup kept public so the query-plan regression inspects exact SQL. */
+export const FTS_MATCH_SNIPPET_SQL = `SELECT substr(snippet(messages_fts, 2, '[', ']', '...', 18), 1, ?) AS snippet
+     FROM messages_fts
+    WHERE rowid = ?
+      AND messages_fts MATCH ?`;
 
 function groupMatches(rows: MatchRow[]): SimilarRow[] {
   const bySession = new Map<string, SimilarRow>();
@@ -966,6 +1020,106 @@ function toFtsQuery(input: string): string {
   return [...new Set(terms)].map((term) => `"${term}"`).join(" OR ");
 }
 
+const MAX_FTS_CANDIDATE_TERMS = 32;
+const MAX_FTS_MATCH_TERMS = 8;
+const MAX_FTS_POSTINGS = 8_000;
+
+interface FtsPlanningOptions {
+  maxCandidateTerms?: number;
+  maxMatchTerms?: number;
+  maxPostings?: number;
+}
+
+/**
+ * Keep an OR query from scanning an unbounded number of common-term postings.
+ *
+ * FTS5's BM25 rank already favors rare terms, but it still has to enumerate
+ * every posting for every OR arm before applying LIMIT. Counting one term at a
+ * time is much cheaper and lets the final ranked query stay within a known
+ * upper bound. Terms absent from the corpus cannot contribute a candidate and
+ * are discarded; selected terms are restored to input order so match_query is
+ * deterministic and readable.
+ */
+export function planFtsQuery(
+  db: DatabaseType,
+  input: string,
+  options: FtsPlanningOptions = {},
+): string {
+  const maxCandidateTerms =
+    options.maxCandidateTerms ?? MAX_FTS_CANDIDATE_TERMS;
+  const maxMatchTerms = options.maxMatchTerms ?? MAX_FTS_MATCH_TERMS;
+  const maxPostings = options.maxPostings ?? MAX_FTS_POSTINGS;
+  const terms = queryTerms(input).slice(0, maxCandidateTerms);
+  if (terms.length === 0) return "";
+
+  const countMatches = db.prepare<[string], { match_count: number }>(
+    `SELECT COUNT(*) AS match_count
+       FROM messages_fts
+      WHERE messages_fts MATCH ?`,
+  );
+  const hasVocabulary = Boolean(
+    db
+      .prepare<[string], { name: string }>(
+        `SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`,
+      )
+      .get("messages_fts_vocab"),
+  );
+  const lookupVocabulary = hasVocabulary
+    ? db.prepare<[string], { doc: number }>(
+        `SELECT doc FROM messages_fts_vocab WHERE term = ?`,
+      )
+    : undefined;
+  const candidates = terms
+    .map((term, index) => ({
+      term,
+      index,
+      postings: ftsTermPostings(term, lookupVocabulary, countMatches),
+    }))
+    .filter((candidate) => candidate.postings > 0)
+    .sort((a, b) => a.postings - b.postings || a.index - b.index);
+
+  if (candidates.length === 0) return quoteFtsTerm(terms[0]!);
+
+  const selected: typeof candidates = [];
+  let postings = 0;
+  for (const candidate of candidates) {
+    if (selected.length >= maxMatchTerms) break;
+    if (selected.length > 0 && postings + candidate.postings > maxPostings) {
+      break;
+    }
+    selected.push(candidate);
+    postings += candidate.postings;
+  }
+
+  return selected
+    .sort((a, b) => a.index - b.index)
+    .map((candidate) => quoteFtsTerm(candidate.term))
+    .join(" OR ");
+}
+
+function ftsTermPostings(
+  term: string,
+  vocabulary: ReturnType<DatabaseType["prepare"]> | undefined,
+  countMatches: ReturnType<DatabaseType["prepare"]>,
+): number {
+  if (vocabulary !== undefined && /^[\p{L}\p{N}_]+$/u.test(term)) {
+    const row = vocabulary.get(term) as { doc: number } | undefined;
+    // FTS5's unicode tokenizer may normalize the stored vocabulary spelling
+    // (for example, `café` is indexed as `cafe`) even though MATCH accepts the
+    // original query spelling. An absent exact vocabulary row is therefore
+    // ambiguous, not proof that the term has no postings.
+    if (row !== undefined) return row.doc;
+  }
+  const row = countMatches.get(quoteFtsTerm(term)) as
+    | { match_count: number }
+    | undefined;
+  return row?.match_count ?? 0;
+}
+
+function quoteFtsTerm(term: string): string {
+  return `"${term}"`;
+}
+
 function queryTerms(input: string): string[] {
   return [
     ...new Set(
@@ -1146,14 +1300,6 @@ function addSessionFilterClauses(
   }
 }
 
-function addInjectedTextExclusion(
-  clauses: string[],
-  params: unknown[],
-  column: string,
-): void {
-  addPrefixExclusion(clauses, params, column, INJECTED_TEXT_PREFIXES);
-}
-
 function addInjectedChunkExclusion(
   clauses: string[],
   params: unknown[],
@@ -1169,16 +1315,6 @@ function addInjectedChunkExclusion(
      )`,
   );
   params.push(...INJECTED_TEXT_PREFIXES.map((prefix) => `${prefix}%`));
-}
-
-function addPrefixExclusion(
-  clauses: string[],
-  params: unknown[],
-  column: string,
-  prefixes: readonly string[],
-): void {
-  clauses.push(`NOT (${prefixMatchSql(column, prefixes)})`);
-  params.push(...prefixes.map((prefix) => `${prefix}%`));
 }
 
 function prefixMatchSql(column: string, prefixes: readonly string[]): string {

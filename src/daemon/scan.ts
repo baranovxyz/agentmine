@@ -66,6 +66,8 @@ export interface DirtyState {
   since: number;
   /** When this source last changed; drives the quiet period. */
   lastChangeAt: number;
+  /** Startup reconciliation must not discard old bytes through a recency filter. */
+  fullReconciliation: boolean;
 }
 
 export interface ScanStats {
@@ -151,11 +153,17 @@ export class SourceIndex {
     this.dirty.delete(source);
   }
 
-  private markDirty(source: string, now: number): void {
+  private markDirty(
+    source: string,
+    now: number,
+    fullReconciliation = false,
+  ): void {
     const existing = this.dirty.get(source);
     this.dirty.set(source, {
       since: existing?.since ?? now,
       lastChangeAt: now,
+      fullReconciliation:
+        (existing?.fullReconciliation ?? false) || fullReconciliation,
     });
   }
 
@@ -163,11 +171,11 @@ export class SourceIndex {
    * Full reconciliation walk. Discovers unknown files, drops removed ones, and
    * refreshes every modification time.
    *
-   * `seedOnly` records what exists WITHOUT marking anything dirty. Startup uses
-   * it so a daemon does not import the entire corpus the first time it runs
-   * merely because it has never seen those files before.
+   * Unknown files are changes. This includes the startup reconciliation: the
+   * normalizer's durable stat cache decides which already-serviced files can
+   * be skipped, rather than an in-memory index that is empty after every crash.
    */
-  async fullWalk(now: number, seedOnly = false): Promise<ScanStats> {
+  async fullWalk(now: number, fullReconciliation = false): Promise<ScanStats> {
     const stats: ScanStats = { statted: 0, changed: 0 };
     const seen = new Set<string>();
     // The walk is also the rebalance: every surviving file is re-placed from
@@ -195,12 +203,11 @@ export class SourceIndex {
           const known = this.files.get(path);
           this.files.set(path, { mtimeMs: mtime, source: source.name });
           this.place(path, mtime, now);
-          if (seedOnly) continue;
           // An unknown file is a change: it is a session that did not exist
           // the last time this source was reconciled.
           if (known === undefined || mtime > known.mtimeMs) {
             stats.changed += 1;
-            this.markDirty(source.name, now);
+            this.markDirty(source.name, now, fullReconciliation);
           }
         }
       }

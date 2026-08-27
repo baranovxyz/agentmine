@@ -12,8 +12,8 @@
  * corpus alone, without inspecting the process table — which matters because
  * the reader is usually somewhere else entirely.
  */
-import { readFile, unlink, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdirSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { z } from "zod";
 import { paths } from "../config.js";
 import { type DatabaseType, upsertMeta } from "../db/client.js";
@@ -24,6 +24,7 @@ import {
   recordStandDown,
   type StandDownReason,
 } from "../db/supervision.js";
+import { removeOwnedLockFile, tryCreateLockFile } from "../lock-file.js";
 
 export { DAEMON_HEARTBEAT_META_KEY, DAEMON_STARTED_META_KEY };
 
@@ -63,68 +64,77 @@ function lockPath(): string {
 
 export interface LockOutcome {
   acquired: boolean;
+  /** Exact lock path for diagnostics and explicit stale recovery. */
+  path: string;
   /** Set when refused: the pid already holding the corpus. */
   heldByPid?: number;
+  /** False when a present lock did not contain trustworthy ownership. */
+  ownershipKnown?: boolean;
 }
+
+interface DaemonLockSnapshot {
+  payload: string;
+  owner: z.infer<typeof lockFileSchema> | null;
+}
+
+let ownedDaemonLock: { path: string; payload: string } | undefined;
 
 /**
  * Refuse a second daemon against one corpus.
  *
  * Concurrent daemons cannot corrupt anything — writers already serialize on the
- * corpus write lock — but they double the cost for no benefit. A lock left by a
- * crashed process is reclaimed: the recorded pid is checked for liveness rather
- * than trusted, or a killed daemon would lock the corpus out permanently.
+ * corpus write lock — but they double the cost for no benefit. Existing locks
+ * fail closed. Automatically reclaiming a lock after a PID-only
+ * liveness check is unsafe because PIDs can be reused, and compare-then-delete
+ * can remove a newer owner's lock. Recovery therefore requires stopping every
+ * possible daemon and removing the exact lock path explicitly.
  */
 export async function acquireDaemonLock(
   now: Date,
-  isAlive: (pid: number) => boolean = defaultIsAlive,
+  pathOverride?: string,
 ): Promise<LockOutcome> {
-  const path = lockPath();
-  const existing = await readLock(path);
-  if (
-    existing !== undefined &&
-    existing.pid !== process.pid &&
-    isAlive(existing.pid)
-  ) {
-    return { acquired: false, heldByPid: existing.pid };
+  const path = pathOverride ?? lockPath();
+  const payload = `${JSON.stringify(
+    { pid: process.pid, startedAt: now.toISOString() },
+    null,
+    2,
+  )}\n`;
+  mkdirSync(dirname(path), { recursive: true });
+
+  if (tryCreateLockFile(path, payload)) {
+    ownedDaemonLock = { path, payload };
+    return { acquired: true, path, ownershipKnown: true };
   }
-  await writeFile(
+  const existing = readLock(path);
+  if (existing === undefined || existing.owner === null) {
+    return { acquired: false, path, ownershipKnown: false };
+  }
+  return {
+    acquired: false,
     path,
-    `${JSON.stringify({ pid: process.pid, startedAt: now.toISOString() }, null, 2)}\n`,
-    "utf8",
-  );
-  return { acquired: true };
+    heldByPid: existing.owner.pid,
+    ownershipKnown: true,
+  };
 }
 
-export async function releaseDaemonLock(): Promise<void> {
-  try {
-    const existing = await readLock(lockPath());
-    if (existing?.pid !== process.pid) return;
-    await unlink(lockPath());
-  } catch {
-    // A lock already gone is the state we wanted.
-  }
-}
-
-async function readLock(
-  path: string,
-): Promise<z.infer<typeof lockFileSchema> | undefined> {
-  try {
-    const parsed = lockFileSchema.safeParse(
-      JSON.parse(await readFile(path, "utf8")),
+export function releaseDaemonLock(): void {
+  const owned = ownedDaemonLock;
+  if (owned === undefined) return;
+  const removal = removeOwnedLockFile(owned.path, owned.payload);
+  if (removal === "changed") {
+    throw new Error(
+      `Refusing to release the Agentmine daemon lock because its ownership payload changed: ${owned.path}`,
     );
-    return parsed.success ? parsed.data : undefined;
+  }
+  ownedDaemonLock = undefined;
+}
+
+function readLock(path: string): DaemonLockSnapshot | undefined {
+  try {
+    const payload = readFileSync(path, "utf8");
+    const parsed = lockFileSchema.safeParse(JSON.parse(payload));
+    return { payload, owner: parsed.success ? parsed.data : null };
   } catch {
     return undefined;
-  }
-}
-
-/** Signal 0 tests for existence without delivering anything. */
-function defaultIsAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
   }
 }

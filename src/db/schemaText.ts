@@ -88,6 +88,10 @@ CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
   content='messages',
   content_rowid='rowid'
 );
+CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts_vocab USING fts5vocab(
+  messages_fts,
+  'row'
+);
 
 -- Session-only: agent tool invocations within a turn
 CREATE TABLE IF NOT EXISTS tool_calls (

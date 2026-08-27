@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   type Band,
   type DaemonConfig,
@@ -76,27 +76,33 @@ interface Harness {
   fs: FakeFs;
   events: DaemonEvent[];
   imports: string[];
+  sinceWindows: Array<string | undefined>;
   extracts: number;
 }
 
+type ImportOutcome = StepOutcome | (() => StepOutcome | Promise<StepOutcome>);
+
 function harness(
   overrides: Partial<DaemonConfig> = {},
-  outcome: StepOutcome = { ok: true, processed: 1 },
+  outcome: ImportOutcome = { ok: true, processed: 1 },
   fs: FakeFs = new FakeFs(),
+  extractOutcome: StepOutcome = { ok: true },
 ): Harness {
   const config: DaemonConfig = { ...DEFAULT_CONFIG, ...overrides };
   const events: DaemonEvent[] = [];
   const imports: string[] = [];
+  const sinceWindows: Array<string | undefined> = [];
   let extracts = 0;
   const index = new SourceIndex([SOURCE], fs, config.bands);
   const daemon = new IngestDaemon([SOURCE], index, config, {
-    runImport: async (source) => {
+    runImport: async (source, sinceWindow) => {
       imports.push(source.name);
-      return outcome;
+      sinceWindows.push(sinceWindow);
+      return typeof outcome === "function" ? await outcome() : outcome;
     },
     runExtract: async () => {
       extracts += 1;
-      return { ok: true };
+      return extractOutcome;
     },
     heartbeat: async () => {},
     onEvent: (e) => events.push(e),
@@ -106,6 +112,7 @@ function harness(
     fs,
     events,
     imports,
+    sinceWindows,
     get extracts() {
       return extracts;
     },
@@ -113,7 +120,7 @@ function harness(
 }
 
 describe("daemon scheduling", () => {
-  it("does not import a corpus that merely already exists", async () => {
+  it("reconciles an existing corpus once after startup", async () => {
     const fs = new FakeFs();
     fs.addFile("/root/a.jsonl", 1_000);
     const h = harness({}, { ok: true }, fs);
@@ -121,7 +128,8 @@ describe("daemon scheduling", () => {
     await h.daemon.start(10_000);
     await h.daemon.tick(20_000);
 
-    expect(h.imports).toEqual([]);
+    expect(h.imports).toEqual(["claude-code"]);
+    expect(h.sinceWindows).toEqual([undefined]);
   });
 
   it("imports a settled change once the quiet period passes", async () => {
@@ -187,7 +195,8 @@ describe("daemon scheduling", () => {
   it("surfaces a failed import without stopping", async () => {
     const fs = new FakeFs();
     fs.addFile("/root/a.jsonl", 1_000);
-    const h = harness({ settleMs: 0 }, { ok: false, error: "boom" }, fs);
+    const outcome: StepOutcome = { ok: false, error: "boom" };
+    const h = harness({ settleMs: 0 }, outcome, fs);
     await h.daemon.start(10_000);
 
     fs.touch("/root/a.jsonl", 12_000);
@@ -195,6 +204,116 @@ describe("daemon scheduling", () => {
 
     expect(h.events.some((e) => e.kind === "error")).toBe(true);
     expect(h.events.some((e) => e.kind === "imported")).toBe(false);
+
+    outcome.ok = true;
+    delete outcome.error;
+    await h.daemon.tick(17_099);
+    expect(h.imports).toEqual(["claude-code"]);
+
+    await h.daemon.tick(17_200);
+    expect(h.imports).toEqual(["claude-code", "claude-code"]);
+    expect(h.events.some((e) => e.kind === "imported")).toBe(true);
+  });
+
+  it("reconciles unchanged bytes after a failed daemon is restarted", async () => {
+    const fs = new FakeFs();
+    fs.addFile("/root/a.jsonl", 1_000);
+    const failed = harness(
+      { settleMs: 0 },
+      { ok: false, error: "interrupted" },
+      fs,
+    );
+    await failed.daemon.start(10_000);
+    await failed.daemon.tick(10_000);
+    expect(failed.imports).toEqual(["claude-code"]);
+
+    const restarted = harness({ settleMs: 0 }, { ok: true }, fs);
+    await restarted.daemon.start(20_000);
+    await restarted.daemon.tick(20_000);
+
+    expect(restarted.imports).toEqual(["claude-code"]);
+    // Startup deliberately omits the ordinary recency window. Persistent
+    // stat-cache entries, not age, decide whether an existing file is done.
+    expect(restarted.sinceWindows).toEqual([undefined]);
+  });
+
+  it("backs off from failure completion rather than attempt start", async () => {
+    const fs = new FakeFs();
+    fs.addFile("/root/a.jsonl", 1_000);
+    let wallNow = 1_000;
+    const now = vi.spyOn(Date, "now").mockImplementation(() => wallNow);
+    try {
+      const h = harness(
+        { settleMs: 0 },
+        () => {
+          wallNow += 6_000;
+          return { ok: false, error: "slow failure" };
+        },
+        fs,
+      );
+      await h.daemon.start(10_000);
+      await h.daemon.tick(10_000);
+
+      await h.daemon.tick(20_999);
+      expect(h.imports).toEqual(["claude-code"]);
+
+      await h.daemon.tick(21_000);
+      expect(h.imports).toEqual(["claude-code", "claude-code"]);
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it("drains a cancelled import without starting more work or reporting a fault", async () => {
+    const fs = new FakeFs();
+    fs.addFile("/root/a.jsonl", 1_000);
+    let finish: ((outcome: StepOutcome) => void) | undefined;
+    const h = harness(
+      { settleMs: 0 },
+      () =>
+        new Promise<StepOutcome>((resolve) => {
+          finish = resolve;
+        }),
+      fs,
+    );
+    await h.daemon.start(10_000);
+
+    const ticking = h.daemon.tick(10_000);
+    await Promise.resolve();
+    expect(finish).toBeDefined();
+    h.daemon.stop();
+    finish?.({ ok: false, cancelled: true });
+    await ticking;
+    await h.daemon.tick(20_000);
+
+    expect(h.imports).toEqual(["claude-code"]);
+    expect(h.extracts).toBe(0);
+    expect(h.events.some((event) => event.kind === "error")).toBe(false);
+  });
+
+  it("retains a failed extraction and retries it with backoff", async () => {
+    const fs = new FakeFs();
+    fs.addFile("/root/a.jsonl", 1_000);
+    const extractOutcome: StepOutcome = { ok: false, error: "extract boom" };
+    const h = harness(
+      { settleMs: 0, extractSettleMs: 1, extractCeilingMs: 60_000 },
+      { ok: true },
+      fs,
+      extractOutcome,
+    );
+    await h.daemon.start(10_000);
+    await h.daemon.tick(10_000);
+    await h.daemon.tick(10_002);
+    expect(h.extracts).toBe(1);
+
+    extractOutcome.ok = true;
+    delete extractOutcome.error;
+    await h.daemon.tick(15_001);
+    expect(h.extracts).toBe(1);
+
+    await h.daemon.tick(15_200);
+    expect(h.extracts).toBe(2);
+    expect(h.events.some((event) => event.kind === "extracted")).toBe(true);
   });
 
   it("extracts on its ceiling even while imports keep arriving", async () => {
@@ -284,6 +403,8 @@ describe("recency bands", () => {
       fs,
     );
     await h.daemon.start(now);
+    await h.daemon.tick(now);
+    h.imports.length = 0;
 
     // A resumed session appends to a file that looked finished.
     fs.touch("/root/ancient.jsonl", now + 10);
@@ -313,6 +434,8 @@ describe("recency bands", () => {
       fs,
     );
     await h.daemon.start(now);
+    await h.daemon.tick(now);
+    h.imports.length = 0;
 
     // A brand-new file has no history to place it in a band; only the
     // directory's own modification time reveals it.

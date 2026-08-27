@@ -1,4 +1,5 @@
 import {
+  chmodSync,
   existsSync,
   mkdtempSync,
   readFileSync,
@@ -41,7 +42,7 @@ describe("db write lock", () => {
       expect(meta.host).toBe(hostname());
       expect(meta.command).toBe("agentmine normalize");
     } finally {
-      lock.release();
+      await lock.release();
     }
   });
 
@@ -50,7 +51,7 @@ describe("db write lock", () => {
       command: "agentmine extract",
       dbPath,
     });
-    first.release();
+    await first.release();
     expect(existsSync(lockPathFor(dbPath))).toBe(false);
 
     // Second acquire must not block now that the first released.
@@ -59,8 +60,28 @@ describe("db write lock", () => {
       dbPath,
       waitMs: 200,
     });
-    second.release();
+    await second.release();
   });
+
+  it.skipIf(process.platform === "win32")(
+    "reports a release failure and retains ownership for a safe retry",
+    async () => {
+      const lock = await acquireWriteLock({
+        command: "agentmine extract",
+        dbPath,
+      });
+      chmodSync(dir, 0o500);
+      try {
+        expect(() => lock.release()).toThrow(/Failed to release/);
+        expect(existsSync(lock.path)).toBe(true);
+      } finally {
+        chmodSync(dir, 0o700);
+      }
+
+      lock.release();
+      expect(existsSync(lock.path)).toBe(false);
+    },
+  );
 
   it("blocks a second writer while held, then fails with a retryable LOCKED error", async () => {
     const held = await acquireWriteLock({
@@ -80,11 +101,11 @@ describe("db write lock", () => {
       expect(err.retryable).toBe(true);
       expect(err.message).toMatch(/write is in progress/);
     } finally {
-      held.release();
+      await held.release();
     }
   });
 
-  it("reclaims a stale lock whose PID is dead on this host", async () => {
+  it("fails closed on a stale lock whose PID is dead on this host", async () => {
     // A PID that is essentially guaranteed not to exist.
     const deadPid = 2_147_483_646;
     writeFileSync(
@@ -97,28 +118,35 @@ describe("db write lock", () => {
       }),
     );
 
-    const lock = await acquireWriteLock({
+    const error = await acquireWriteLock({
       command: "agentmine normalize",
       dbPath,
-      waitMs: 200,
-    });
-    try {
-      const meta = JSON.parse(readFileSync(lock.path, "utf8"));
-      expect(meta.pid).toBe(process.pid);
-    } finally {
-      lock.release();
-    }
+      waitMs: 100,
+    }).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(CliError);
+    if (!(error instanceof CliError)) throw new Error("expected a CliError");
+    expect(error.cliName).toBe("LOCKED");
+    expect(error.message).toContain(lockPathFor(dbPath));
+    expect(JSON.parse(readFileSync(lockPathFor(dbPath), "utf8"))).toMatchObject(
+      {
+        pid: deadPid,
+      },
+    );
   });
 
-  it("reclaims a corrupt lock file", async () => {
+  it("fails closed on a corrupt lock file", async () => {
     writeFileSync(lockPathFor(dbPath), "{ not json");
-    const lock = await acquireWriteLock({
+    const error = await acquireWriteLock({
       command: "agentmine extract",
       dbPath,
-      waitMs: 200,
-    });
-    lock.release();
-    expect(existsSync(lockPathFor(dbPath))).toBe(false);
+      waitMs: 100,
+    }).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(CliError);
+    if (!(error instanceof CliError)) throw new Error("expected a CliError");
+    expect(error.cliName).toBe("LOCKED");
+    expect(readFileSync(lockPathFor(dbPath), "utf8")).toBe("{ not json");
   });
 
   it("withWriteLock releases even when the body throws", async () => {
