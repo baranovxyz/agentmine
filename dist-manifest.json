@@ -11,7 +11,7 @@
     },
     {
       "path": "cli.js",
-      "sha256": "0866f377f3638ff34d115ad9d3a77aac2493444c29ecad07a916ca2b5dc65e61",
+      "sha256": "9acbf329b09d4c200f5fa6b69e5186676edb20b9b8a4d2eb858c2180b4ed0297",
       "size": 418,
       "executable": true
     },
@@ -22,9 +22,9 @@
       "executable": false
     },
     {
-      "path": "main-ERWETJZT.js",
-      "sha256": "ef992b5afa66d13a492802d4702498b7f046d24a87920da95c96956914874dce",
-      "size": 429365,
+      "path": "main-JQ3LAECV.js",
+      "sha256": "360946e3608337b2a9778a48747db527105877582e2ae2bdd4b44da5182227f6",
+      "size": 429391,
       "executable": false
     }
   ]

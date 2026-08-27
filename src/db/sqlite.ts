@@ -95,7 +95,10 @@ export interface PragmaOptions {
 
 // --- the sanctioned typing boundary for this file (see header) -----------
 function asRow<R>(value: unknown): R | undefined {
-  return value as R | undefined;
+  // node:sqlite returns undefined when Statement.get() finds no row, while
+  // bun:sqlite returns null. Normalize both runtimes to the public contract so
+  // callers never have to defend against a value the type does not expose.
+  return value === null ? undefined : (value as R | undefined);
 }
 function asRows<R>(value: unknown): R[] {
   return value as R[];
