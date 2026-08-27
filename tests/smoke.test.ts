@@ -33,6 +33,7 @@ import {
 import { readFreshnessSnapshot } from "../src/db/freshness.js";
 import { acquireWriteLock } from "../src/db/lock.js";
 import { decodePayload } from "../src/db/payloadCodec.js";
+import { recordSupervision } from "../src/db/supervision.js";
 import { recordFileStat, upsertSessionWithPayload } from "../src/db/writer.js";
 import { runAllExtractors } from "../src/extract/index.js";
 import { VERSION } from "../src/version.js";
@@ -758,7 +759,7 @@ describe("cli envelope", () => {
         });
       }
     } finally {
-      held.release();
+      await held.release();
     }
     expect(existsSync(backupPath)).toBe(false);
     const unchanged = openDb({ readonly: true, init: false, path: dbPath });
@@ -1039,6 +1040,8 @@ describe("cli envelope", () => {
     async () => {
       const dir = mkdtempSync(join(tmpdir(), "agentmine-similar-"));
       const dbPath = join(dir, "test.db");
+      const serviceDefinition = join(dir, "agentmine-daemon.service");
+      writeFileSync(serviceDefinition, "");
       const db = openDb({ path: dbPath });
       try {
         upsertSessionWithPayload(db, {
@@ -1079,6 +1082,12 @@ describe("cli envelope", () => {
           ],
           contentHash: randomUUID(),
         });
+        recordSupervision(db, {
+          kind: "systemd",
+          definition_path: serviceDefinition,
+          program_path: "/usr/local/bin/agentmine",
+          installed_at: "2026-08-01T00:00:00.000Z",
+        });
       } finally {
         db.close();
       }
@@ -1097,6 +1106,9 @@ describe("cli envelope", () => {
       expect(parsed.data.rows[0].reconstruct_command).toBe(
         "agentmine session cc--auth-router --md",
       );
+      expect(parsed.warnings).toEqual([
+        expect.objectContaining({ name: "DAEMON_NOT_RUNNING" }),
+      ]);
     },
     CLI_TEST_TIMEOUT,
   );
@@ -1798,8 +1810,8 @@ describe("cli envelope", () => {
       utimesSync(childRaw, oldMtime, oldMtime);
 
       const [root, child] = await Promise.all([
-        parseCodexFile(rootFixture),
-        parseCodexFile(childFixture),
+        parseCodexFile(rootRaw),
+        parseCodexFile(childRaw),
       ]);
       expect(root).not.toBeNull();
       expect(child).not.toBeNull();
@@ -1831,6 +1843,13 @@ describe("cli envelope", () => {
         parentSessionId: undefined,
         agentType: "codex-tui",
       });
+      for (const rawPath of [rootRaw, childRaw]) {
+        const rawStat = statSync(rawPath);
+        recordFileStat(legacy, rawPath, {
+          mtimeMs: Math.round(rawStat.mtimeMs),
+          size: rawStat.size,
+        });
+      }
       upsertMeta(legacy, "schema_version", "13");
       legacy.close();
 
@@ -1873,7 +1892,6 @@ describe("cli envelope", () => {
       // Simulate an incomplete sync: the migration runs while the old Codex
       // files are temporarily absent, but another source still gives the
       // all-source normalize useful work to do.
-      rmSync(rootRaw);
       rmSync(childRaw);
       const missingCodexRun = await runCli(
         ["normalize", "--source", "codex", "--since", "1d"],
@@ -1885,11 +1903,12 @@ describe("cli envelope", () => {
       );
       expect(missingCodexRun.exitCode).toBe(0);
       expect(JSON.parse(missingCodexRun.stdout.trim()).data).toMatchObject({
-        files_scanned: 0,
-        processed: 0,
+        files_scanned: 1,
+        processed: 1,
+        processed_by_source: { codex: 1 },
         codex_lineage_backfill: true,
         codex_token_usage_backfill: true,
-        codex_token_usage_backfill_remaining: 2,
+        codex_token_usage_backfill_remaining: 1,
       });
       expect(JSON.parse(missingCodexRun.stdout.trim()).warnings).toContainEqual(
         expect.objectContaining({
@@ -1908,11 +1927,12 @@ describe("cli envelope", () => {
       });
       expect(incompleteRun.exitCode).toBe(0);
       expect(JSON.parse(incompleteRun.stdout.trim()).data).toMatchObject({
-        files_scanned: 1,
+        files_scanned: 2,
         processed_by_source: { qwen: 1 },
+        skipped_unchanged: 1,
         codex_lineage_backfill: true,
         codex_token_usage_backfill: true,
-        codex_token_usage_backfill_remaining: 2,
+        codex_token_usage_backfill_remaining: 1,
       });
       expect(JSON.parse(incompleteRun.stdout.trim()).warnings).toContainEqual(
         expect.objectContaining({
@@ -1930,14 +1950,12 @@ describe("cli envelope", () => {
               WHERE source = 'codex' AND content_hash IS NULL`,
           )
           .get()?.count,
-      ).toBe(2);
+      ).toBe(1);
       pending.close();
 
       // Restored archive files retain their old mtimes. The pending marker
       // must make the next --since run include them anyway.
-      copyFileSync(rootFixture, rootRaw);
       copyFileSync(childFixture, childRaw);
-      utimesSync(rootRaw, oldMtime, oldMtime);
       utimesSync(childRaw, oldMtime, oldMtime);
 
       const failingRoot = join(dir, "failing-source");
@@ -1970,7 +1988,8 @@ describe("cli envelope", () => {
       expect(exitCode, `${stdout}\n${stderr}`).toBe(1);
       const result = JSON.parse(stdout.trim());
       expect(result.data).toMatchObject({
-        processed_by_source: { codex: 2 },
+        processed_by_source: { codex: 1 },
+        skipped_unchanged: 2,
         failed: 1,
         codex_lineage_backfill: true,
         codex_token_usage_backfill: true,
@@ -2229,7 +2248,7 @@ describe("cli envelope", () => {
       });
       unchanged.close();
     } finally {
-      held.release();
+      await held.release();
     }
 
     const synced = await runCli(["prices", "sync"], {

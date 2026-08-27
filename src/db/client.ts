@@ -18,7 +18,7 @@ type DatabaseType = Database;
  * shipped without a bump is silent -- the corpus keeps reporting its facts as
  * current while they were built by superseded logic.
  */
-export const CURRENT_SCHEMA_VERSION = 17;
+export const CURRENT_SCHEMA_VERSION = 18;
 const SCHEMA_VERSION = String(CURRENT_SCHEMA_VERSION);
 export const CODEX_LINEAGE_BACKFILL_META_KEY = "codex_lineage_backfill_pending";
 export const CODEX_TOKEN_USAGE_BACKFILL_META_KEY =
@@ -227,6 +227,25 @@ function applyDataMigrations(db: DatabaseType): void {
         WHERE source = 'codex'`,
     ).run();
     upsertMeta(db, CODEX_TOKEN_USAGE_BACKFILL_META_KEY, "1");
+  }
+
+  if (currentVersion < 18) {
+    // Codex backfills used to disable the file-stat cache for the whole source
+    // until every legacy row had been restored. One missing rollout therefore
+    // made every later daemon cycle reparse the complete Codex archive. Keep
+    // only unresolved rows cache-cold instead: a successful batch repopulates
+    // its entries, so an interrupted or incomplete backfill resumes from the
+    // rows that still need work.
+    db.prepare(
+      `DELETE FROM file_stat_cache
+        WHERE path IN (
+          SELECT raw_path
+            FROM sessions
+           WHERE source = 'codex'
+             AND content_hash IS NULL
+             AND raw_path IS NOT NULL
+        )`,
+    ).run();
   }
 }
 

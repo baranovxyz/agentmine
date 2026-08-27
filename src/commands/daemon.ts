@@ -54,6 +54,7 @@ import {
 import {
   assertConfiguredCorpusReady,
   CURRENT_SCHEMA_VERSION,
+  type DatabaseType,
   getMeta,
   openDb,
 } from "../db/client.js";
@@ -129,6 +130,11 @@ export const daemonCommand = defineCommand({
       type: "string",
       description: "Maximum wait before deriving fact tables",
     },
+    "supersession-interval-ms": {
+      type: "string",
+      description:
+        "How often the running daemon checks for a newer program or corpus",
+    },
     "exit-after-ms": {
       type: "string",
       description: "Stop after this long (for smoke tests)",
@@ -189,7 +195,10 @@ export const daemonCommand = defineCommand({
             DEFAULT_CONFIG.extractCeilingMs,
           ),
           heartbeatIntervalMs: DEFAULT_CONFIG.heartbeatIntervalMs,
-          supersessionIntervalMs: DEFAULT_CONFIG.supersessionIntervalMs,
+          supersessionIntervalMs: intArg(
+            args["supersession-interval-ms"],
+            DEFAULT_CONFIG.supersessionIntervalMs,
+          ),
         });
 
         const only = new Set(config.only);
@@ -206,120 +215,171 @@ export const daemonCommand = defineCommand({
         const startedAt = new Date();
         const lock = await acquireDaemonLock(startedAt);
         if (!lock.acquired) {
+          const holder =
+            lock.heldByPid === undefined
+              ? " (lock ownership could not be validated)"
+              : ` (pid ${String(lock.heldByPid)})`;
           throw Errors.locked(
-            `Another agentmine daemon is already running for this corpus (pid ${String(lock.heldByPid)}). ` +
-              "Two daemons double the work without importing anything sooner.",
+            `Another agentmine daemon is already running for this corpus${holder}. ` +
+              "Two daemons double the work without importing anything sooner. " +
+              `If the owner exited without releasing the lock, stop all Agentmine daemons, ` +
+              `verify that none remain, and remove exactly ${lock.path}.`,
           );
         }
 
-        const db = openDb();
-        recordDaemonStart(db, startedAt);
-
         const totals = { imports: 0, extracts: 0, errors: 0 };
-        const index = new SourceIndex(sources, nodeScanFs, config.bands);
-        const daemon = new IngestDaemon(sources, index, config, {
-          runImport: (source, since) => importSource(source, since),
-          runExtract: () => runStage(["extract"]),
-          heartbeat: async (at) => {
-            recordDaemonHeartbeat(db, new Date(at));
-          },
-          onEvent: (event) => {
-            if (event.kind === "imported") totals.imports += 1;
-            if (event.kind === "extracted") totals.extracts += 1;
-            if (event.kind === "error") totals.errors += 1;
-            emit(event);
-          },
-        });
-
-        await daemon.start(Date.now());
-
-        // Captured after startup so a program that vanished during the initial
-        // walk is reported by the running check rather than crashing the walk.
-        const identity = await captureProgramIdentity(
-          resolveSelfInvocation([]).programPath,
-        );
-
+        const childAbort = new AbortController();
         let standDown:
           | Extract<SupersessionCheck, { superseded: true }>
           | undefined;
-
-        // Run until told to stop. The promise is what keeps the command alive,
-        // so the result envelope is written once, on the way out.
-        await new Promise<void>((resolve) => {
-          let stopping = false;
-          const stop = (): void => {
-            if (stopping) return;
-            stopping = true;
-            clearInterval(timer);
-            clearInterval(supervisionTimer);
-            resolve();
-          };
-          const timer = setInterval(() => {
-            void daemon.tick(Date.now()).catch((error: unknown) => {
-              totals.errors += 1;
-              emit({
-                kind: "error",
-                source: undefined,
-                message: error instanceof Error ? error.message : String(error),
-              });
-            });
-          }, TICK_MS);
-
-          const supervisionTimer = setInterval(() => {
-            void (async () => {
-              const check = await currentSupersession(db, identity);
-              if (!check.superseded) return;
-              standDown = check;
-              emit({
-                kind: "stood-down",
-                reason: check.reason,
-                message: check.detail,
-              });
-              stop();
-            })().catch(() => {
-              // A check that cannot run is not evidence of supersession, and
-              // standing down on it would turn a transient read failure into a
-              // restart loop.
-            });
-          }, config.supersessionIntervalMs);
-
-          process.on("SIGINT", stop);
-          process.on("SIGTERM", stop);
-          const exitAfter = intArg(args["exit-after-ms"], 0);
-          if (exitAfter > 0) setTimeout(stop, exitAfter);
-        });
-
-        if (standDown !== undefined) {
-          recordDaemonStandDown(
-            db,
-            standDown.reason,
-            standDown.detail,
-            new Date(),
-          );
-        }
-        await releaseDaemonLock();
-        db.close();
-
-        // Standing down is reported as a fault so the supervisor restarts the
-        // daemon: the generated definitions restart on failure and deliberately
-        // leave a clean exit alone, which is what makes an upgrade repair
-        // itself without the operator.
-        if (standDown !== undefined) {
-          throw Errors.superseded(
-            `Agentmine daemon stood down because ${standDown.detail}. ` +
-              "A supervised daemon restarts into the current version; an unsupervised one should be started again.",
-          );
-        }
-
-        return {
-          data: {
-            sources: sources.map((s) => s.name),
-            started_at: startedAt.toISOString(),
-            imports: totals.imports,
-            extracts: totals.extracts,
-            errors: totals.errors,
-          },
+        let db: DatabaseType | undefined;
+        let daemon: IngestDaemon | undefined;
+        const activeWork = new Set<Promise<void>>();
+        const track = (work: Promise<void>): void => {
+          activeWork.add(work);
+          void work.finally(() => activeWork.delete(work));
         };
+        let timer: NodeJS.Timeout | undefined;
+        let supervisionTimer: NodeJS.Timeout | undefined;
+        let exitAfterTimer: NodeJS.Timeout | undefined;
+        let stopping = false;
+        let resolveStopped: (() => void) | undefined;
+        const stopped = new Promise<void>((resolve) => {
+          resolveStopped = resolve;
+        });
+        const stop = (): void => {
+          if (stopping) return;
+          stopping = true;
+          if (timer !== undefined) clearInterval(timer);
+          if (supervisionTimer !== undefined) clearInterval(supervisionTimer);
+          if (exitAfterTimer !== undefined) clearTimeout(exitAfterTimer);
+          daemon?.stop();
+          childAbort.abort();
+          resolveStopped?.();
+        };
+        const onSigint = (): void => stop();
+        const onSigterm = (): void => stop();
+        process.on("SIGINT", onSigint);
+        process.on("SIGTERM", onSigterm);
+
+        try {
+          // Everything after acquiring the fail-closed daemon lock lives under
+          // this cleanup guard. Controlled startup failures and early signals
+          // must never strand a lock that later starts cannot reclaim safely.
+          db = openDb();
+          recordDaemonStart(db, startedAt);
+          const index = new SourceIndex(sources, nodeScanFs, config.bands);
+          daemon = new IngestDaemon(sources, index, config, {
+            runImport: (source, since) =>
+              importSource(source, since, childAbort.signal),
+            runExtract: () => runStage(["extract"], childAbort.signal),
+            heartbeat: async (at) => {
+              if (db === undefined) return;
+              recordDaemonHeartbeat(db, new Date(at));
+            },
+            onEvent: (event) => {
+              if (event.kind === "imported") totals.imports += 1;
+              if (event.kind === "extracted") totals.extracts += 1;
+              if (event.kind === "error") totals.errors += 1;
+              emit(event);
+            },
+          });
+
+          await daemon.start(Date.now());
+
+          if (!stopping) {
+            // Captured after startup so a program that vanished during the
+            // initial walk is reported by the running check rather than
+            // crashing the walk.
+            const identity = await captureProgramIdentity(
+              resolveSelfInvocation([]).programPath,
+            );
+
+            if (!stopping) {
+              timer = setInterval(() => {
+                if (daemon === undefined) return;
+                track(
+                  daemon.tick(Date.now()).catch((error: unknown) => {
+                    totals.errors += 1;
+                    emit({
+                      kind: "error",
+                      source: undefined,
+                      message:
+                        error instanceof Error ? error.message : String(error),
+                    });
+                  }),
+                );
+              }, TICK_MS);
+
+              supervisionTimer = setInterval(() => {
+                if (db === undefined) return;
+                track(
+                  (async () => {
+                    if (db === undefined) return;
+                    const check = await currentSupersession(db, identity);
+                    if (!check.superseded) return;
+                    standDown = check;
+                    emit({
+                      kind: "stood-down",
+                      reason: check.reason,
+                      message: check.detail,
+                    });
+                    stop();
+                  })().catch(() => {
+                    // A check that cannot run is not evidence of supersession,
+                    // and standing down on it would turn a transient read
+                    // failure into a restart loop.
+                  }),
+                );
+              }, config.supersessionIntervalMs);
+
+              const exitAfter = intArg(args["exit-after-ms"], 0);
+              if (exitAfter > 0) exitAfterTimer = setTimeout(stop, exitAfter);
+            }
+          }
+
+          await stopped;
+          await Promise.allSettled([...activeWork]);
+
+          if (standDown !== undefined) {
+            recordDaemonStandDown(
+              db,
+              standDown.reason,
+              standDown.detail,
+              new Date(),
+            );
+          }
+
+          // Standing down is reported as a fault so the supervisor restarts
+          // the daemon. Generated definitions restart on failure and leave a
+          // clean exit alone, which makes an upgrade repair itself.
+          if (standDown !== undefined) {
+            throw Errors.superseded(
+              `Agentmine daemon stood down because ${standDown.detail}. ` +
+                "A supervised daemon restarts into the current version; an unsupervised one should be started again.",
+            );
+          }
+
+          return {
+            data: {
+              sources: sources.map((s) => s.name),
+              started_at: startedAt.toISOString(),
+              imports: totals.imports,
+              extracts: totals.extracts,
+              errors: totals.errors,
+            },
+          };
+        } finally {
+          stop();
+          await Promise.allSettled([...activeWork]);
+          process.removeListener("SIGINT", onSigint);
+          process.removeListener("SIGTERM", onSigterm);
+          try {
+            db?.close();
+          } finally {
+            releaseDaemonLock();
+          }
+        }
       },
     });
   },
@@ -353,6 +413,7 @@ async function serviceDefinitionResult(
     "dir-interval-ms",
     "extract-settle-ms",
     "extract-ceiling-ms",
+    "supersession-interval-ms",
   ]) {
     const value = args[flag];
     if (typeof value === "string" && value.length > 0) {
@@ -453,23 +514,32 @@ async function currentSupersession(
  */
 async function importSource(
   source: DaemonSource,
-  sinceWindow: string,
+  sinceWindow: string | undefined,
+  signal: AbortSignal,
 ): Promise<StepOutcome> {
   if (source.kind === "mirror") {
-    const synced = await runStage(["sync", "--source", source.name]);
+    const synced = await runStage(["sync", "--source", source.name], signal);
     if (!synced.ok) return synced;
   }
-  return runStage([
-    "normalize",
-    "--source",
-    source.name,
-    "--since",
-    sinceWindow,
-  ]);
+  const normalizeArgs = ["normalize", "--source", source.name, "--allow-empty"];
+  if (sinceWindow !== undefined) normalizeArgs.push("--since", sinceWindow);
+  return runStage(normalizeArgs, signal);
 }
 
-async function runStage(args: string[]): Promise<StepOutcome> {
-  const result = await runSelf(args);
+async function runStage(
+  args: string[],
+  signal: AbortSignal,
+): Promise<StepOutcome> {
+  // A contended stage returns after the normal bounded writer wait. The daemon
+  // keeps it pending and retries, so contention stays legible without losing
+  // freshness or leaving one child blocked forever on stale PID evidence.
+  const result = await runSelf(args, {
+    signal,
+    onProgress: (event) => process.stderr.write(`${JSON.stringify(event)}\n`),
+  });
+  if (result.aborted) {
+    return { ok: false, cancelled: true, error: "daemon stage interrupted" };
+  }
   if (result.exitCode !== 0) {
     return {
       ok: false,

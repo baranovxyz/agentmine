@@ -70,7 +70,7 @@ describe("ingest child error propagation", () => {
         retryAfterSeconds: 5,
       });
     } finally {
-      held.release();
+      await held.release();
       rmSync(dir, { recursive: true, force: true });
     }
   }, 15_000);

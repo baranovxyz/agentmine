@@ -11,6 +11,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { execa } from "execa";
 import { afterEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 import {
@@ -442,13 +443,14 @@ describe("cold-import benchmark harness", () => {
     expect(sanitized).toBe("ENOENT '<path>' and '<path>'");
   });
 
-  it("keeps the documented pnpm wrapper JSON-clean for invalid arguments", () => {
-    const result = spawnSync(
+  it("keeps the documented pnpm wrapper JSON-clean for invalid arguments", async () => {
+    const result = await execa(
       process.platform === "win32" ? "pnpm.cmd" : "pnpm",
       ["--silent", "benchmark:cold-import"],
       {
         cwd: agentmineRoot,
-        encoding: "utf8",
+        env: { ...process.env, NODE_EXTRA_CA_CERTS: undefined },
+        reject: false,
       },
     );
     const stdoutLines = result.stdout.trim().split("\n");
@@ -468,10 +470,10 @@ describe("cold-import benchmark harness", () => {
       })
       .parse(JSON.parse(stdoutLines[0] ?? ""));
 
-    expect(result.status).toBe(2);
+    expect(result.exitCode).toBe(2);
     expect(result.stderr).toBe("");
     expect(envelope.errors).toHaveLength(1);
-  });
+  }, 90_000);
 
   it("emits the same coded invalid-argument envelope when invoked directly", () => {
     const result = spawnSync(process.execPath, [benchmarkScript], {

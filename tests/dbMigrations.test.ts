@@ -12,7 +12,11 @@ import {
   openDb,
   upsertMeta,
 } from "../src/db/client.js";
-import { sessionIsUpToDate } from "../src/db/writer.js";
+import {
+  loadFileStatCache,
+  recordFileStat,
+  sessionIsUpToDate,
+} from "../src/db/writer.js";
 import { VERSION } from "../src/version.js";
 
 const dirs: string[] = [];
@@ -143,6 +147,49 @@ describe("Agentmine data migrations", () => {
       expect(getMeta(migrated, "schema_version")).toBe(
         String(CURRENT_SCHEMA_VERSION),
       );
+    } finally {
+      migrated.close();
+    }
+  });
+
+  it("invalidates file-stat cache entries only for unresolved Codex backfill rows", () => {
+    const dir = mkdtempSync(join(tmpdir(), "agentmine-resumable-backfill-"));
+    dirs.push(dir);
+    const dbPath = join(dir, "sessions.db");
+    const pendingPath = join(dir, "pending.jsonl");
+    const repairedPath = join(dir, "repaired.jsonl");
+    const claudePath = join(dir, "claude.jsonl");
+
+    const legacy = openDb({ path: dbPath });
+    legacy
+      .prepare(
+        `INSERT INTO sessions (id, source, raw_path, content_hash)
+         VALUES ('cx--pending', 'codex', ?, NULL),
+                ('cx--repaired', 'codex', ?, 'codex-hash'),
+                ('cc--cached', 'claude-code', ?, 'claude-hash')`,
+      )
+      .run(pendingPath, repairedPath, claudePath);
+    for (const path of [pendingPath, repairedPath, claudePath]) {
+      recordFileStat(legacy, path, { mtimeMs: 1, size: 2 });
+    }
+    upsertMeta(legacy, CODEX_TOKEN_USAGE_BACKFILL_META_KEY, "1");
+    upsertMeta(legacy, "schema_version", "17");
+    legacy.close();
+
+    const migrated = openDb({ path: dbPath });
+    try {
+      expect([...loadFileStatCache(migrated).keys()].sort()).toEqual(
+        [claudePath, repairedPath].sort(),
+      );
+      expect(getMeta(migrated, CODEX_TOKEN_USAGE_BACKFILL_META_KEY)).toBe("1");
+      expect(
+        migrated
+          .prepare(
+            `SELECT name FROM sqlite_master
+              WHERE type = 'table' AND name = 'messages_fts_vocab'`,
+          )
+          .get(),
+      ).toEqual({ name: "messages_fts_vocab" });
     } finally {
       migrated.close();
     }

@@ -3,6 +3,27 @@
 Notable Agentmine changes only. Keep this file short; detailed implementation notes belong in
 commit history and release notes.
 
+## 0.11.2 - 2026-08-27
+
+Upgrading needs no manual corpus migration. The next ordinary writer applies schema version 18 and
+resumes any interrupted Codex repair from its remaining inputs.
+
+- Resume interrupted Codex backfills selectively. Repaired rollout files repopulate the stat cache
+  even while another historical input is missing, so later normalization skips completed work
+  instead of reparsing the complete archive indefinitely.
+- Reconcile every present source when the ingest daemon starts, retain failed stages for bounded
+  retries, and treat a source with no eligible sessions as a successful no-op. Shutdown and
+  supersession now terminate and await the active stage process group before releasing daemon state.
+- Bound corpus-writer contention to five seconds by default. Lock ownership is published atomically,
+  failures name the exact recovery path, and stale-looking or malformed locks fail closed instead of
+  risking deletion of a newer owner's lock.
+- Bound lexical similarity work before ranking. FTS planning keeps the rarest useful terms within
+  fixed term and posting budgets, candidate details use rowid-constrained virtual-table lookups,
+  injected candidates do not generate snippets, and returned lexical snippets are capped at 512
+  characters. Results expose the effective `match_query`.
+- Report stalled installed supervision on pure lexical similarity reads without adding unrelated
+  extraction warnings.
+
 ## 0.11.1 - 2026-08-19
 
 Upgrading from 0.11.0 or earlier needs no manual step. Opening a corpus with this version schedules

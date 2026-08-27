@@ -64,6 +64,10 @@ node dist/cli.js workflow <run_id>    # one run: rollups, ordered phases, per-ag
 
 ## Hard rules
 
+- **Documentation language:** Write all Agentmine documentation in English,
+  including changelogs, guides, ADRs, living specs, runbooks, and release notes.
+  Preserve another language only when quoting exact source text that cannot be
+  translated without changing its meaning.
 - **Naming:** Use **Agentmine** for the product/tool in prose, including
   sentence starts and headings. Use `agentmine` for the executable,
   package name, command examples, env/config prefixes, and code literals.
@@ -87,9 +91,11 @@ node dist/cli.js workflow <run_id>    # one run: rollups, ordered phases, per-ag
   `extract`, `embed`, `prices sync`, `compact`, and `purge --yes`) and the
   consistency-sensitive `backup` command use `withWriteLock` (`src/db/lock.ts`),
   an advisory lock at `${db}.lock`. A held lock waits up to
-  `$AGENTMINE_LOCK_TIMEOUT_MS` (default 60s) then fails with a retryable `LOCKED`;
-  a stale lock is reclaimed only when its PID is dead on this host. Dry-run paths
-  write nothing and skip the lock. Any new corpus write path must use the lock.
+  `$AGENTMINE_LOCK_TIMEOUT_MS` (default 5s) then fails with a retryable `LOCKED`;
+  daemon-owned stages remain pending and retry after the same bounded attempt.
+  The lock does not preempt holders, guarantee acquisition priority, or reclaim
+  stale ownership automatically. Dry-run paths write nothing and skip the lock.
+  Any new corpus write path must use the lock.
 - **Schema drift is forbidden.** `src/db/schema.sql` is canonical;
   `src/db/schemaText.ts` is its bundled copy. Edit both, in the same
   commit. If the change is breaking, bump `SCHEMA_VERSION` in

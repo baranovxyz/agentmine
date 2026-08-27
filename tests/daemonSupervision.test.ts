@@ -2,6 +2,7 @@ import {
   chmodSync,
   mkdirSync,
   mkdtempSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   unlinkSync,
@@ -75,10 +76,11 @@ describe("program durability", () => {
     const tree = makeTempDir();
     mkdirSync(join(tree, ".git"));
     mkdirSync(join(tree, "dist"));
-    const assessment = await assess(makeProgram(join(tree, "dist"), "cli.js"));
+    const program = realpathSync(makeProgram(join(tree, "dist"), "cli.js"));
+    const assessment = await assess(program);
 
     expect(assessment.verdict).toBe("working-tree");
-    expect(assessment.detail).toContain(tree);
+    expect(assessment.detail).toContain(realpathSync(tree));
   });
 
   it("refuses a program reached by a link into a working tree", async () => {
@@ -94,7 +96,7 @@ describe("program durability", () => {
     const assessment = await assess(link);
 
     expect(assessment.verdict).toBe("linked-dependency");
-    expect(assessment.resolved_path).toBe(real);
+    expect(assessment.resolved_path).toBe(realpathSync(real));
   });
 
   it("refuses a program under the temporary directory", async () => {

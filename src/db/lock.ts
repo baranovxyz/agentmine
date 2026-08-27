@@ -1,17 +1,11 @@
-import {
-  closeSync,
-  mkdirSync,
-  openSync,
-  readFileSync,
-  unlinkSync,
-  writeSync,
-} from "node:fs";
+import { mkdirSync, readFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { dirname } from "node:path";
 import { z } from "zod";
 import { getDbPath } from "../config.js";
 import { Errors } from "../contract/errors.js";
 import { reportProgressImmediate } from "../contract/progress.js";
+import { removeOwnedLockFile, tryCreateLockFile } from "../lock-file.js";
 
 /**
  * Cross-process advisory write lock for `sessions.db`.
@@ -25,15 +19,16 @@ import { reportProgressImmediate } from "../contract/progress.js";
  * whole write commands so only one agentmine writer touches the corpus at a
  * time, which also avoids two processes redundantly parsing the same archives.
  *
- * The lock is a single file at `${dbPath}.lock` created with O_EXCL. A holder
- * that crashes leaves a stale file; we reclaim it only when the recorded PID is
- * dead on this host (never steal from a live local holder), or — for the
- * implausible cross-host case — when it is older than `staleMs`.
+ * The lock is a single file at `${dbPath}.lock`, published atomically only after
+ * its ownership payload is complete. Existing locks always fail closed: a
+ * process cannot safely compare and delete one lock generation atomically while
+ * another process may publish the next generation. Stale recovery is therefore
+ * an explicit operator action after every possible holder has been stopped.
  */
 
-const DEFAULT_WAIT_MS = 60_000;
-const DEFAULT_STALE_MS = 60 * 60_000; // 1h — safely above any real write duration
+const DEFAULT_WAIT_MS = 5_000;
 const POLL_INTERVAL_MS = 100;
+const WAIT_PROGRESS_INTERVAL_MS = 5_000;
 const WAIT_ENV = "AGENTMINE_LOCK_TIMEOUT_MS";
 
 const writeLockInfoSchema = z.object({
@@ -50,10 +45,8 @@ export interface WriteLockOptions {
   command: string;
   /** Override DB path; the lock lives at `${dbPath}.lock`. Default: getDbPath(). */
   dbPath?: string;
-  /** Max ms to wait for a held lock before failing. Default 60s ($AGENTMINE_LOCK_TIMEOUT_MS). */
+  /** Max ms to wait for a held lock before failing. Default 5s ($AGENTMINE_LOCK_TIMEOUT_MS). */
   waitMs?: number;
-  /** A cross-host lock older than this (ms) is treated as abandoned. Default 1h. */
-  staleMs?: number;
 }
 
 export interface WriteLock {
@@ -67,50 +60,26 @@ export function lockPathFor(dbPath?: string): string {
 }
 
 function resolveWaitMs(explicit: number | undefined): number {
-  if (explicit !== undefined) return explicit;
+  if (explicit !== undefined && Number.isFinite(explicit) && explicit >= 0) {
+    return explicit;
+  }
   const fromEnv = Number(process.env[WAIT_ENV]);
   return Number.isFinite(fromEnv) && fromEnv >= 0 ? fromEnv : DEFAULT_WAIT_MS;
 }
 
-function readMeta(path: string): WriteLockInfo | null {
+interface LockSnapshot {
+  payload: string;
+  holder: WriteLockInfo | null;
+}
+
+function readSnapshot(path: string): LockSnapshot | undefined {
   try {
-    const result = writeLockInfoSchema.safeParse(
-      JSON.parse(readFileSync(path, "utf8")),
-    );
-    return result.success ? result.data : null;
+    const payload = readFileSync(path, "utf8");
+    const result = writeLockInfoSchema.safeParse(JSON.parse(payload));
+    return { payload, holder: result.success ? result.data : null };
   } catch {
-    return null;
+    return undefined;
   }
-}
-
-/** The errno `code` of a Node error, without an `as` cast. */
-function errorCode(err: unknown): string | undefined {
-  if (err instanceof Error && "code" in err) {
-    const { code } = err;
-    return typeof code === "string" ? code : undefined;
-  }
-  return undefined;
-}
-
-/** True if a PID is live on this host. A signal-0 EPERM means it exists. */
-function pidAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err) {
-    return errorCode(err) === "EPERM";
-  }
-}
-
-/**
- * Decide whether an existing lock file may be reclaimed. Same-host locks are
- * stolen only when their PID is dead — never from a live local holder, however
- * long it has run. A corrupt file (null meta) is always stealable.
- */
-function isStale(meta: WriteLockInfo | null, staleMs: number): boolean {
-  if (meta === null) return true;
-  if (meta.host === hostname()) return !pidAlive(meta.pid);
-  return Date.now() - meta.acquiredAt > staleMs;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -127,7 +96,6 @@ export async function acquireWriteLock(
 ): Promise<WriteLock> {
   const path = lockPathFor(options.dbPath);
   const waitMs = resolveWaitMs(options.waitMs);
-  const staleMs = options.staleMs ?? DEFAULT_STALE_MS;
   const meta: WriteLockInfo = {
     pid: process.pid,
     host: hostname(),
@@ -139,52 +107,46 @@ export async function acquireWriteLock(
   mkdirSync(dirname(path), { recursive: true });
 
   const deadline = Date.now() + waitMs;
+  const waitStartedAt = Date.now();
+  let lastWaitProgressAt: number | undefined;
   for (;;) {
     try {
-      const fd = openSync(path, "wx");
-      try {
-        writeSync(fd, payload);
-      } finally {
-        closeSync(fd);
-      }
-      return makeHandle(path, payload);
+      if (tryCreateLockFile(path, payload)) return makeHandle(path, payload);
     } catch (err) {
-      if (errorCode(err) !== "EEXIST") {
-        const message = err instanceof Error ? err.message : String(err);
-        throw Errors.ioError(
-          `Failed to acquire agentmine write lock: ${message}`,
-          path,
-        );
-      }
-      const holder = readMeta(path);
-      if (isStale(holder, staleMs)) {
-        reportProgressImmediate("db.lock.reclaim", {
-          path,
-          stale_pid: holder?.pid ?? null,
-          stale_host: holder?.host ?? null,
-        });
-        try {
-          unlinkSync(path);
-        } catch {
-          // Another waiter reclaimed it first; loop and retry the create.
-        }
-        continue;
-      }
-      if (Date.now() >= deadline) {
-        const who = holder
-          ? `pid ${holder.pid} on ${holder.host} (command "${holder.command}")`
-          : "another process";
-        throw Errors.locked(
-          `Another agentmine write is in progress: ${who}. Waited ${waitMs}ms for ` +
-            `${path}. Retry shortly, or raise ${WAIT_ENV}.`,
-        );
-      }
+      const message = err instanceof Error ? err.message : String(err);
+      throw Errors.ioError(
+        `Failed to acquire agentmine write lock: ${message}`,
+        path,
+      );
+    }
+    const holder = readSnapshot(path)?.holder ?? null;
+    if (Date.now() >= deadline) {
+      const who = holder
+        ? `pid ${holder.pid} on ${holder.host} (command "${holder.command}")`
+        : "another process with unreadable ownership metadata";
+      throw Errors.locked(
+        `Another agentmine write is in progress: ${who}. Waited ${waitMs}ms for ` +
+          `${path}. Retry shortly, or raise ${WAIT_ENV}. If the owner exited ` +
+          `without releasing the lock, stop all Agentmine writers, verify that ` +
+          `none remain, and remove exactly ${path}.`,
+      );
+    }
+    const now = Date.now();
+    if (
+      lastWaitProgressAt === undefined ||
+      now - lastWaitProgressAt >= WAIT_PROGRESS_INTERVAL_MS
+    ) {
+      lastWaitProgressAt = now;
       reportProgressImmediate("db.lock.wait", {
         path,
         holder_pid: holder?.pid ?? null,
+        holder_command: holder?.command ?? null,
+        holder_acquired_at: holder?.acquiredAt ?? null,
+        waited_ms: now - waitStartedAt,
+        timeout_ms: Number.isFinite(waitMs) ? waitMs : null,
       });
-      await sleep(POLL_INTERVAL_MS);
     }
+    await sleep(POLL_INTERVAL_MS);
   }
 }
 
@@ -198,19 +160,35 @@ function makeHandle(path: string, ownPayload: string): WriteLock {
     path,
     release(): void {
       if (released) return;
-      released = true;
       process.removeListener("exit", onExit);
-      tryUnlinkOwn(path, ownPayload);
+      try {
+        const removal = removeOwnedLockFile(path, ownPayload);
+        if (removal === "changed") {
+          throw Errors.ioError(
+            "Refusing to release the Agentmine write lock because its ownership payload changed. Stop all writers and inspect the exact lock path before recovery.",
+            path,
+          );
+        }
+        released = true;
+      } catch (error) {
+        process.once("exit", onExit);
+        if (error instanceof Error && "cliName" in error) throw error;
+        const message = error instanceof Error ? error.message : String(error);
+        throw Errors.ioError(
+          `Failed to release the Agentmine write lock: ${message}`,
+          path,
+        );
+      }
     },
   };
 }
 
-/** Remove the lock file only if it still holds our payload (don't clobber a reclaim). */
+/** A cooperating process cannot replace this lock because reclaim is manual. */
 function tryUnlinkOwn(path: string, ownPayload: string): void {
   try {
-    if (readFileSync(path, "utf8") === ownPayload) unlinkSync(path);
+    removeOwnedLockFile(path, ownPayload);
   } catch {
-    // Already gone or unreadable — nothing to release.
+    // Process exit cannot recover or report through the CLI result contract.
   }
 }
 
