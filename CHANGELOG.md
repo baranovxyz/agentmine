@@ -3,6 +3,28 @@
 Notable Agentmine changes only. Keep this file short; detailed implementation notes belong in
 commit history and release notes.
 
+## 0.12.0 - 2026-09-02
+
+Upgrading needs no manual step. Opening a corpus with this version schedules the rebuild the
+turn-boundary change below requires, and the next ordinary `agentmine extract` performs it.
+
+- Pick up agent-canonical 0.4.1 (0.4.0 plus a rewritten README), which changes what several parsers treat as a turn boundary:
+  - Claude Code: an interrupt marker now ends an aborted turn instead of being swallowed, an
+    `isMeta` skill-injection record no longer counts as a user turn, and background-work events
+    are recognized.
+  - Codex: a `<turn_aborted>` marker no longer counts as a user turn.
+  - cursor-agent: a `turn_ended` event becomes the authoritative terminal signal instead of an
+    inferred one.
+
+  Turn boundaries feed directly into extracted facts — aborted-turn counts, friction/correction
+  attribution, and anything else turn-scoped — so a corpus fully extracted under an earlier
+  version now disagrees with the code reading it.
+- Treat that change as a corpus migration. Schema version moves to 19, and opening an older
+  corpus clears the incremental-extract marker so the next ordinary `extract` rebuilds every
+  fact table from the corrected boundaries; a running daemon on an older corpus stands down for
+  its supervisor to restart it into this version. No re-normalize needed — this is extract-side
+  only, so re-parsing every transcript would reproduce identical raw events.
+
 ## 0.11.3 - 2026-08-27
 
 Upgrading needs no corpus migration.

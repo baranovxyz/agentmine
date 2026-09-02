@@ -438,6 +438,17 @@ describe("freshness command warnings", () => {
         "EXTRACTION_PENDING",
       );
       for (const result of [freshQueryResult, freshTopResult, freshWorkflows]) {
+        // Assert the exit code before parsing: a command that fails here
+        // returns a well-formed `{ data: null, errors: [...] }` envelope, and
+        // parsing that straight into `commandEnvelopeSchema` (which requires
+        // `data` to be a record) throws an opaque ZodError two layers removed
+        // from the actual failure. Surfacing exit code + full stdout/stderr
+        // first means a rare, load-sensitive CI failure here names its real
+        // cause instead of just "expected record, received null".
+        expect(
+          result.exitCode,
+          `stdout: ${result.stdout}\nstderr: ${result.stderr}`,
+        ).toBe(0);
         const envelope = commandEnvelopeSchema.parse(
           JSON.parse(result.stdout.trim()),
         );
