@@ -138,21 +138,18 @@ describe("reviewed dist manifest", () => {
     );
   });
 
-  it.each([
-    "../cli.js",
-    "/cli.js",
-    "C:/cli.js",
-    "cli\\evil.js",
-    "cli\t.js",
-  ])("rejects unsafe manifest path %j", async (path) => {
-    const valid = await entry("cli.js");
-    await writeManifest([{ ...valid, path }]);
+  it.each(["../cli.js", "/cli.js", "C:/cli.js", "cli\\evil.js", "cli\t.js"])(
+    "rejects unsafe manifest path %j",
+    async (path) => {
+      const valid = await entry("cli.js");
+      await writeManifest([{ ...valid, path }]);
 
-    const result = await verify();
+      const result = await verify();
 
-    expect(result.exitCode).toBe(1);
-    expect(result.stderr).toContain("invalid artifact path");
-  });
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain("invalid artifact path");
+    },
+  );
 
   it("rejects unsorted and case-colliding manifest entries", async () => {
     const [cli, lib] = await Promise.all([entry("cli.js"), entry("lib.js")]);

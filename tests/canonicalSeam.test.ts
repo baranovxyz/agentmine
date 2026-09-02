@@ -144,20 +144,18 @@ describe("canonical seam — parseCodexFile lineage", () => {
       parentSessionId: "cx--lineage-path-worker-001",
       agentType: "guardian",
     },
-  ])("preserves canonical identity and direct lineage for a $kind", async ({
-    fixture,
-    id,
-    parentSessionId,
-    agentType,
-  }) => {
-    const session = await parseCodexFile(join(CODEX_FIXTURE_DIR, fixture));
+  ])(
+    "preserves canonical identity and direct lineage for a $kind",
+    async ({ fixture, id, parentSessionId, agentType }) => {
+      const session = await parseCodexFile(join(CODEX_FIXTURE_DIR, fixture));
 
-    expect(session).not.toBeNull();
-    expect(session?.source).toBe("codex");
-    expect(session?.id).toBe(id);
-    expect(session?.parentSessionId).toBe(parentSessionId);
-    expect(session?.agentType).toBe(agentType);
-  });
+      expect(session).not.toBeNull();
+      expect(session?.source).toBe("codex");
+      expect(session?.id).toBe(id);
+      expect(session?.parentSessionId).toBe(parentSessionId);
+      expect(session?.agentType).toBe(agentType);
+    },
+  );
 
   it("rejects malformed negative token counters from the shared parser", async () => {
     const dir = mkdtempSync(join(tmpdir(), "agentmine-negative-codex-"));

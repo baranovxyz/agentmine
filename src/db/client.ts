@@ -18,7 +18,7 @@ type DatabaseType = Database;
  * shipped without a bump is silent -- the corpus keeps reporting its facts as
  * current while they were built by superseded logic.
  */
-export const CURRENT_SCHEMA_VERSION = 18;
+export const CURRENT_SCHEMA_VERSION = 19;
 const SCHEMA_VERSION = String(CURRENT_SCHEMA_VERSION);
 export const CODEX_LINEAGE_BACKFILL_META_KEY = "codex_lineage_backfill_pending";
 export const CODEX_TOKEN_USAGE_BACKFILL_META_KEY =
@@ -170,6 +170,26 @@ function applyDataMigrations(db: DatabaseType): void {
     // `content_hash` the way the Codex migrations below do -- this change is
     // extract-side only, so forcing a re-normalize would re-parse every
     // transcript in the corpus to produce identical rows.
+    deleteMeta(db, EXTRACT_READY_META_KEY);
+  }
+
+  if (currentVersion < 19) {
+    // agent-canonical 0.4.0 changes what several parsers treat as a turn
+    // boundary: a Claude Code interrupt marker now ends an aborted turn instead
+    // of being swallowed, `isMeta` skill-injection records stop counting as user
+    // turns, and background-work events are recognized; a Codex `<turn_aborted>`
+    // marker no longer counts as a user turn; a cursor-agent `turn_ended` event
+    // becomes the authoritative terminal signal instead of an inferred one.
+    // Turn boundaries feed directly into extracted facts (aborted-turn counts,
+    // friction/correction attribution, anything turn-scoped), so every row
+    // built from the old boundaries disagrees with the code that reads it now.
+    // The schema is untouched, so nothing else here would notice.
+    //
+    // Clearing the incremental-extract marker is the whole migration, same as
+    // the schema-17 block above: the next ordinary `extract` rebuilds every
+    // fact table from the corrected boundaries. Not invalidating `content_hash`
+    // -- this is extract-side only, so a re-normalize would re-parse every
+    // transcript to reproduce identical raw events.
     deleteMeta(db, EXTRACT_READY_META_KEY);
   }
 

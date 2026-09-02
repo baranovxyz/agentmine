@@ -330,6 +330,61 @@ describe("Agentmine data migrations", () => {
     }
   });
 
+  it("makes the next ordinary extract rebuild every fact table after the schema-19 turn-boundary change", () => {
+    // agent-canonical 0.4.0 changes what counts as a turn boundary for Claude
+    // Code, Codex, and cursor-agent alike. A corpus fully extracted under
+    // schema 18 disagrees with the code reading it now, and nothing else here
+    // would notice without this migration.
+    const dir = mkdtempSync(
+      join(tmpdir(), "agentmine-turn-boundary-migration-"),
+    );
+    dirs.push(dir);
+    const dbPath = join(dir, "sessions.db");
+
+    const legacy = openDb({ path: dbPath });
+    upsertMeta(legacy, "schema_version", "18");
+    upsertMeta(legacy, EXTRACT_READY_META_KEY, "1");
+    legacy.close();
+
+    const upgraded = openDb({ path: dbPath });
+    try {
+      expect(getMeta(upgraded, EXTRACT_READY_META_KEY)).toBeUndefined();
+      expect(getMeta(upgraded, "schema_version")).toBe(
+        String(CURRENT_SCHEMA_VERSION),
+      );
+    } finally {
+      upgraded.close();
+    }
+  });
+
+  it("runs the schema-19 turn-boundary migration for a corpus that has never ingested Codex", () => {
+    // Same guard hazard as the schema-17 case above: the turn-boundary
+    // migration must fire before the Codex-only guard below it, or it would be
+    // silently skipped for every corpus with no Codex sessions at all.
+    const dir = mkdtempSync(
+      join(tmpdir(), "agentmine-turn-boundary-no-codex-migration-"),
+    );
+    dirs.push(dir);
+    const dbPath = join(dir, "sessions.db");
+
+    const legacy = openDb({ path: dbPath });
+    upsertMeta(legacy, "schema_version", "18");
+    upsertMeta(legacy, EXTRACT_READY_META_KEY, "1");
+    expect(
+      legacy
+        .prepare(`SELECT COUNT(*) AS n FROM sessions WHERE source = 'codex'`)
+        .get(),
+    ).toEqual({ n: 0 });
+    legacy.close();
+
+    const upgraded = openDb({ path: dbPath });
+    try {
+      expect(getMeta(upgraded, EXTRACT_READY_META_KEY)).toBeUndefined();
+    } finally {
+      upgraded.close();
+    }
+  });
+
   it("runs the derivation migration for a corpus that has never ingested Codex", () => {
     // The Codex-specific backfills below it are guarded on a Codex row existing.
     // That guard used to sit above every migration, which would have skipped
