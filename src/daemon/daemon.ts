@@ -13,6 +13,14 @@ import type { ScanStats, SourceIndex } from "./scan.js";
 /** Avoid a failed stage becoming a 500 ms child-process restart loop. */
 const STAGE_RETRY_MS = 5_000;
 
+/**
+ * A changed session is re-imported whole, so one large session being written
+ * can keep its source importing back to back, rewriting hundreds of megabytes a
+ * minute. After each successful import the source idles this many times the
+ * import's own duration, so importing occupies at most a fifth of the time.
+ */
+const IMPORT_IDLE_FACTOR = 4;
+
 export interface StepOutcome {
   ok: boolean;
   /** The daemon is shutting down; preserve pending work without reporting a fault. */
@@ -88,7 +96,7 @@ export class IngestDaemon {
   private extractPendingSince: number | undefined;
   private lastImportAt: number | undefined;
   private lastHeartbeatAt = 0;
-  private readonly importRetryAt = new Map<string, number>();
+  private readonly importNotBefore = new Map<string, number>();
   private extractRetryAt: number | undefined;
   private stopping = false;
 
@@ -202,8 +210,8 @@ export class IngestDaemon {
         this.index.clearPending(pending.source);
         continue;
       }
-      const retryAt = this.importRetryAt.get(source.name);
-      if (retryAt !== undefined && now < retryAt) continue;
+      const notBefore = this.importNotBefore.get(source.name);
+      if (notBefore !== undefined && now < notBefore) continue;
       // Settled means no NEW change for the quiet period; the ceiling counts
       // from the first unserviced change. Measuring both from the same instant
       // would make a source that never stops being written look settled as soon
@@ -229,7 +237,7 @@ export class IngestDaemon {
       const finished = Date.now();
       if (this.stopping || outcome.cancelled) return;
       if (!outcome.ok) {
-        this.importRetryAt.set(
+        this.importNotBefore.set(
           source.name,
           now + (finished - started) + STAGE_RETRY_MS,
         );
@@ -240,7 +248,10 @@ export class IngestDaemon {
         });
         continue;
       }
-      this.importRetryAt.delete(source.name);
+      this.importNotBefore.set(
+        source.name,
+        now + (finished - started) * (1 + IMPORT_IDLE_FACTOR),
+      );
       this.index.clearPending(source.name);
       this.ports.onEvent({
         kind: "imported",

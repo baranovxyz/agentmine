@@ -3,6 +3,15 @@
 Notable Agentmine changes only. Keep this file short; detailed implementation notes belong in
 commit history and release notes.
 
+## 0.12.1 - 2026-11-20
+
+Upgrading needs no corpus migration.
+
+- Idle the ingest daemon after a slow import. A changed session is re-imported whole, so one large
+  session being written kept its source importing back to back and rewrote the corpus continuously,
+  enough to fill the disk. Each source now waits four times its last import's duration before the
+  next one; an import shorter than a fifth of the import ceiling still meets it.
+
 ## 0.12.0 - 2026-09-02
 
 Upgrading needs no manual step. Opening a corpus with this version schedules the rebuild the
