@@ -264,6 +264,36 @@ describe("daemon scheduling", () => {
     }
   });
 
+  it("idles a source in proportion to how long its last import took", async () => {
+    const fs = new FakeFs();
+    fs.addFile("/root/a.jsonl", 1_000);
+    let wallNow = 1_000;
+    const now = vi.spyOn(Date, "now").mockImplementation(() => wallNow);
+    try {
+      const h = harness(
+        { settleMs: 0, ceilingMs: 1_000 },
+        () => {
+          wallNow += 10_000;
+          return { ok: true, processed: 1 };
+        },
+        fs,
+      );
+      await h.daemon.start(10_000);
+      await h.daemon.tick(10_000);
+      expect(h.imports).toHaveLength(1);
+
+      fs.touch("/root/a.jsonl", 20_000);
+      await h.daemon.tick(20_000);
+      await h.daemon.tick(59_999);
+      expect(h.imports).toHaveLength(1);
+
+      await h.daemon.tick(60_000);
+      expect(h.imports).toHaveLength(2);
+    } finally {
+      now.mockRestore();
+    }
+  });
+
   it("drains a cancelled import without starting more work or reporting a fault", async () => {
     const fs = new FakeFs();
     fs.addFile("/root/a.jsonl", 1_000);

@@ -11,7 +11,7 @@
     },
     {
       "path": "cli.js",
-      "sha256": "6bfa0a9ddc09acfc44dd54a907a9d3549a6c9907c6a9e929a7211ffbb8fdc652",
+      "sha256": "c51a690870e6443872ab0fc99bd489218d1ae5ac7f918363d364a8a271536995",
       "size": 418,
       "executable": true
     },
@@ -22,9 +22,9 @@
       "executable": false
     },
     {
-      "path": "main-HUCR6NCG.js",
-      "sha256": "55ccde5d02f15b38e617ee118bb198c6922b5ff2292d9d4ed26f08a3e531ca57",
-      "size": 429468,
+      "path": "main-BXJRWQXG.js",
+      "sha256": "acea9f53963fddd48376f25b677e56670e93656fa13029c05efebc86e8e6b63d",
+      "size": 429586,
       "executable": false
     }
   ]
